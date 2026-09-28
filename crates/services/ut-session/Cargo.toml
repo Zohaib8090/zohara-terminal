@@ -9,6 +9,7 @@ license.workspace = true
 ut-pty = { path = "../../core/ut-pty" }
 ut-grid = { path = "../../core/ut-grid" }
 ut-safety = { path = "../../core/ut-safety" }
+libc = "0.2"
 
 [dev-dependencies]
 libc = "0.2"

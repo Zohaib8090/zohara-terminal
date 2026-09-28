@@ -1,16 +1,20 @@
 //! `ut-plugin-ssh`: SSH/SFTP plugin (Section 12 "SSH and remote work").
 //!
-//! What's implemented now: the [`HostProfile`] data model (saved hosts,
+//! What's implemented: the [`HostProfile`] data model (saved hosts,
 //! groups, tags, jump hosts, port/identity fields) and a parser for
-//! OpenSSH's `~/.ssh/config` format ("SSH config import") — both are pure,
-//! offline, and don't need a network connection to be useful or testable.
+//! OpenSSH's `~/.ssh/config` format ("SSH config import"); and, in the
+//! [`client`] module, a real SSH client ([`client::SshClient`], built on
+//! `ssh2`/libssh2) — connect, known-hosts verification, authenticate
+//! (password/key file/key material/agent), and run a command. See
+//! [`client`]'s module docs for how its live-connection tests are run
+//! (they need a reachable `sshd` and are `#[ignore]`d by default, but were
+//! verified against a real local test server in development).
 //!
-//! Not yet implemented: actually opening connections, port forwarding,
-//! the SFTP browser, and known-host verification — those need a real SSH
-//! client library and a live network, which is out of scope for this pass.
-//! The [`Plugin`] impl below is deliberately minimal (it only recognizes
-//! `ssh <host>` commands against imported profiles) so the crate compiles
-//! and is wired into the plugin system now, ready to grow into the rest.
+//! Not yet implemented: port forwarding and the SFTP browser — `ssh2`
+//! supports both (`Channel` direct-tcpip and `Sftp`), so adding them is an
+//! extension of `client.rs`, not a new architecture.
+
+pub mod client;
 
 use std::collections::HashMap;
 use ut_plugin_api::{Permissions, Plugin, PluginAction, PluginContext};

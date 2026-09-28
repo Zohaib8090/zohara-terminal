@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 ut-plugin-api = { path = "../ut-plugin-api" }
+ssh2 = "0.9"
+base64 = "0.22"
+thiserror = "1"
 
 [dev-dependencies]
 ut-safety = { path = "../../core/ut-safety" }

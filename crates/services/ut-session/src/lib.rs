@@ -83,6 +83,51 @@ impl Pane {
         }
     }
 
+    /// Like [`Pane::pump_output`], but also returns the exact bytes read,
+    /// for a caller that needs to re-broadcast the raw stream verbatim —
+    /// e.g. `ut-daemon` forwarding live output to attached clients —
+    /// rather than only updating `self.terminal`.
+    ///
+    /// Returns `Ok(None)` when the fd is non-blocking and no data is
+    /// available yet (distinct from EOF, which is `Ok(Some(&[]))`) — a
+    /// caller polling this on a non-blocking pane should treat `None` as
+    /// "try again shortly", not "the shell exited".
+    pub fn pump_output_captured<'b>(&mut self, buf: &'b mut [u8]) -> io::Result<Option<&'b [u8]>> {
+        match self.pty.read(buf) {
+            Ok(n) => {
+                if n > 0 {
+                    self.terminal.feed(&buf[..n]);
+                    if let Some(title) = self.title_from_terminal() {
+                        self.title = title;
+                    }
+                }
+                Ok(Some(&buf[..n]))
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set the underlying PTY master fd's blocking mode. A dedicated
+    /// reader thread that also needs to interleave writes through the same
+    /// `Mutex<Pane>` (as `ut-daemon` does) must use non-blocking mode and
+    /// poll — holding the lock through a *blocking* read would starve any
+    /// writer waiting on the same mutex.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let fd = self.pty.master_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let new_flags = if nonblocking { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
+            if libc::fcntl(fd, libc::F_SETFL, new_flags) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
     fn title_from_terminal(&self) -> Option<String> {
         if self.terminal.title.is_empty() {
             None
@@ -118,6 +163,24 @@ impl Pane {
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         self.pty.resize(PtySize::new(cols, rows))?;
         self.terminal.resize(cols as usize, rows as usize);
+        Ok(())
+    }
+
+    /// Write raw bytes straight to the shell, bypassing `ut-safety`
+    /// entirely. This exists for a *low-level* passthrough channel — e.g.
+    /// `ut-daemon`'s attach connection, which forwards a real terminal
+    /// client's raw keystrokes exactly the way a real terminal does. A real
+    /// terminal doesn't safety-check every byte either: it's the layer that
+    /// *composes* a full command line (a line editor, a shell wrapper) that
+    /// is responsible for calling `submit_input` on the assembled line
+    /// before it's sent. Only use this when nothing between the keystroke
+    /// source and this call has a chance to assemble a full command line.
+    pub fn write_raw(&self, bytes: &[u8]) -> io::Result<()> {
+        self.pty_write(bytes)
+    }
+
+    fn pty_write(&self, bytes: &[u8]) -> io::Result<()> {
+        self.pty.write(bytes)?;
         Ok(())
     }
 
@@ -313,6 +376,27 @@ mod tests {
         set_nonblocking(&pane);
         drain_until(&mut pane, Duration::from_secs(5), |p| p.terminal.plain_text().iter().any(|l| l.contains("integration-ok")));
         assert!(pane.terminal.plain_text().iter().any(|l| l.contains("integration-ok")));
+    }
+
+    #[test]
+    fn pump_output_captured_returns_exact_bytes() {
+        let mut pane = spawn_test_pane(1, "/bin/sh", &["-c", "echo captured-ok"]);
+        set_nonblocking(&pane);
+        let start = Instant::now();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match pane.pump_output_captured(&mut buf) {
+                Ok(Some(chunk)) => seen.extend_from_slice(chunk),
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            if String::from_utf8_lossy(&seen).contains("captured-ok") || start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(String::from_utf8_lossy(&seen).contains("captured-ok"));
     }
 
     fn spawn_test_pane(id: u64, cmd: &str, args: &[&str]) -> Pane {

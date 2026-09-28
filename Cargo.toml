@@ -7,11 +7,13 @@ members = [
     "crates/core/ut-config",
     "crates/core/ut-safety",
     "crates/services/ut-session",
+    "crates/services/ut-daemon",
     "crates/services/ut-history",
     "crates/services/ut-search",
     "crates/services/ut-profile",
     "crates/services/ut-notify",
     "crates/plugins/ut-plugin-api",
+    "crates/plugins/ut-plugin-signing",
     "crates/plugins/ssh",
     "crates/plugins/package-manager",
     "crates/plugins/workflow",
@@ -20,6 +22,7 @@ members = [
     "crates/app/ut-input",
     "crates/app/ut-ui",
     "crates/app/ut-cli",
+    "crates/app/ut-tui",
     "crates/app/ut-app",
 ]
 

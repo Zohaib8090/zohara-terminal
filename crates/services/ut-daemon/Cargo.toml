@@ -1,0 +1,13 @@
+[package]
+name = "ut-daemon"
+description = "Session persistence daemon (Section 13): named sessions that outlive a client, over a Unix socket — detach, reattach, list, rename, close"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-session = { path = "../ut-session" }
+ut-safety = { path = "../../core/ut-safety" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"

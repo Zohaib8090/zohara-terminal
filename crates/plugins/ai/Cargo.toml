@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 ut-plugin-api = { path = "../ut-plugin-api" }
 ut-safety = { path = "../../core/ut-safety" }
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+thiserror = "1"

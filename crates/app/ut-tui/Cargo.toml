@@ -1,0 +1,23 @@
+[package]
+name = "ut-tui"
+description = "Interactive terminal-hosted multiplexer UI (Section 4/13): real split panes over ut-session, rendered with ratatui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ut_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ut-tui"
+path = "src/main.rs"
+
+[dependencies]
+ut-session = { path = "../../services/ut-session" }
+ut-grid = { path = "../../core/ut-grid" }
+ut-ui = { path = "../ut-ui" }
+ut-input = { path = "../ut-input" }
+ut-safety = { path = "../../core/ut-safety" }
+ratatui = "0.29"
+crossterm = "0.28"

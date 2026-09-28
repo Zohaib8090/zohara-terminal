@@ -1,17 +1,23 @@
-//! `ut-plugin-ai`: local-only assistance (Section 15 "AI assistance").
+//! `ut-plugin-ai`: local-only and network-backed assistance (Section 15
+//! "AI assistance").
 //!
-//! What's implemented now is deliberately the "no model, no network" floor
-//! required by "Local-only mode" / "Disable network AI by default for
-//! private sessions": a small offline lookup table that explains common
-//! commands and flags ([`Explainer`]), plus wiring the `ut-safety` risk
-//! report into [`PluginAction::ShowMessage`] so a command gets a plain-
-//! English risk explanation ("Show risk classification") *before* it runs,
-//! with zero network calls. Natural-language command generation, log
-//! summarization, and actual model backends (Ollama/llama.cpp/remote
-//! providers) are future work layered behind the same [`Plugin`] hooks —
-//! none of that changes the "AI safety" guarantees below, which live in
-//! `ut-plugin-api::PluginContext` (never execute silently, always require
-//! approval) rather than in this crate.
+//! [`AiAssistant`] is the "no model, no network" floor required by
+//! "Local-only mode" / "Disable network AI by default for private
+//! sessions": a small offline lookup table that explains common commands
+//! and flags ([`Explainer`]), plus wiring the `ut-safety` risk report into
+//! [`PluginAction::ShowMessage`] so a command gets a plain-English risk
+//! explanation ("Show risk classification") *before* it runs, with zero
+//! network calls. [`provider::NetworkAssistant`] (in the [`provider`]
+//! module) is the opt-in "Remote-provider mode" / "Ollama support" half —
+//! it requests the `network` permission explicitly and checks it again at
+//! the call site, so nothing here can silently start making network
+//! requests. Neither ever executes a command on its own: every answer goes
+//! through `ut-plugin-api::PluginContext` (never execute silently, always
+//! require approval).
+
+mod provider;
+
+pub use provider::{AiProvider, NetworkAssistant, OllamaProvider, ProviderError};
 
 use std::collections::HashMap;
 use ut_plugin_api::{Permissions, Plugin, PluginAction, PluginContext};
