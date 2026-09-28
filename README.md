@@ -41,8 +41,9 @@ crates/
     ├── ut-renderer      # Grid → ANSI text reproduction + damage/diff tracking
     ├── ut-ui              # pane split-tree layout (splits, resize, zoom) — pure data
     ├── ut-tui               # a real interactive multiplexer UI (ratatui) over ut-session + ut-ui
-    ├── ut-cli                 # `zohara check`/`zohara paste` — safety-engine CLI
-    └── ut-app                    # `run` — spawns a real command through the whole core stack
+    ├── ut-gui                 # a real native OS window (eframe/egui) over ut-tui's own App
+    ├── ut-cli                   # `zohara check`/`zohara paste` — safety-engine CLI
+    └── ut-app                      # `run` — spawns a real command through the whole core stack
 ```
 
 ### Why the split is where it is
@@ -71,10 +72,14 @@ crates/
   model.** Each named session is a genuine background thread pumping a
   real PTY, independent of any attached client — detach/reattach is a
   socket disconnect/reconnect, not a special mode.
-- **`app/*` is the only layer allowed to assume a runtime/toolkit shape.**
-  `ut-tui` is that layer's first real occupant: an interactive terminal-
-  hosted UI (not yet a native windowed GUI — still future work) built on
-  `ratatui`, wired straight into `ut-session`/`ut-ui`/`ut-input`.
+- **`app/*` is the only layer allowed to assume a runtime/toolkit shape,
+  and `ut-gui` is the payoff of that boundary.** `ut-tui`'s `App` (panes,
+  split layout, the safety-gated input line) has zero ratatui-specific
+  code in it — it's just state. `ut-gui` depends on `ut-tui` as a library
+  and reuses that exact `App` unmodified, writing only a new renderer
+  (`Grid` → `egui::text::LayoutJob`, in `ut-gui::render`) and a new input
+  translator (`egui::Event` → `ut_input::Key`, in `main.rs`). Getting a
+  second, real, native-windowed front end cost two files, not a rewrite.
 
 ### See it work end-to-end
 
@@ -86,27 +91,43 @@ cargo run -p ut-app -- run --force -- ls -la  # --force bypasses the gate
 cargo run -p ut-tui   # a real interactive multiplexer: splits, zoom, close, destructive-command
                        # confirmation prompts, all over real shells. Ctrl+B is the prefix key
                        # (", -, x, z, q) — see crates/app/ut-tui/src/main.rs for the full list.
+
+cargo run -p ut-gui   # the same, in a real native OS window (eframe/egui). Same Ctrl+B prefix.
 ```
 
 `ut-app run` spawns the given program behind a real `ut-pty`, feeds every
 byte of its output through `ut-ansi`/`ut-grid`, and prints the resulting
 screen once the program exits — proving the parser, the grid, and the PTY
 layer are wired together correctly, not just unit-tested in isolation.
-`ut-tui` proves the same for the full interactive stack, including
+`ut-tui`/`ut-gui` prove the same for the full interactive stack, including
 `ut-daemon`'s session model when driven through its socket protocol.
+
+`ut-gui` was verified with real rendered screenshots, not just "it
+compiles": a software-rendered `Xvfb` display + `eframe`'s own
+`ViewportCommand::Screenshot` captured a running shell prompt, a live
+horizontal split with two independent shells, and the destructive-command
+confirmation banner correctly holding back `rm -rf /`. Re-run that
+yourself with `ut-gui`'s verification flags:
+
+```
+xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/out.png \
+    --exit-after-frames 60 --auto-type 'echo hello'
+```
 
 ## Building
 
 ```
 cargo build --workspace
-cargo test --workspace     # 246 tests across 24 crates, all offline/hermetic
+cargo test --workspace     # 254 tests across 24 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
 Requires a recent stable Rust toolchain (edition 2021), a C toolchain +
 `libssl-dev` (for `ut-plugin-ssh`'s `ssh2`/libssh2 binding), and is
 Unix-only (`ut-pty` uses `nix`/`libc` directly; Arch Linux is the target
-platform).
+platform). `ut-gui` additionally needs a windowing system at *run* time
+(X11/Wayland — a real desktop, or `Xvfb`/similar for a headless box) but
+not at *build* time; `cargo build`/`test`/`clippy` for it need no display.
 
 `ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`
 against a real server) are `#[ignore]`d by default so `cargo test
@@ -145,13 +166,16 @@ cargo test -p ut-plugin-ssh -- --ignored
 
 ## What's not here yet
 
-A native windowed GUI (`ut-tui` is the terminal-hosted UI standing in for
-it today), SSH's SFTP browser and port forwarding (the `SshClient`
-foundation they'd extend already exists in `ut-plugin-ssh::client`),
-workflow editors/exporters, actual dynamic plugin loading (signing/
-verification exists in `ut-plugin-signing`; loading a `.so` behind that
-check is still future work), and llama.cpp/remote-provider AI backends
-(Ollama is implemented; the `AiProvider` trait is what a second backend
-implements) are all future work described in
-[`docs/SPEC.md`](docs/SPEC.md). The crate layout above is built so each of
-those is an addition to one crate, not a restructuring.
+`ut-gui` gives the project a real native window, but it's still one plain
+window — no multi-window/tray/dropdown/PiP modes, no themes-as-settings
+(colors are hardcoded), no mouse-driven resize/drag for panes (only the
+Ctrl+B keyboard prefix), no font/appearance picker. SSH's SFTP browser and
+port forwarding are still missing (the `SshClient` foundation they'd
+extend already exists in `ut-plugin-ssh::client`). Workflow editors/
+exporters, actual dynamic plugin loading (signing/verification exists in
+`ut-plugin-signing`; loading a `.so` behind that check is still future
+work), and llama.cpp/remote-provider AI backends (Ollama is implemented;
+the `AiProvider` trait is what a second backend implements) round out the
+list — all described in [`docs/SPEC.md`](docs/SPEC.md). The crate layout
+above is built so each of those is an addition to one crate, not a
+restructuring.

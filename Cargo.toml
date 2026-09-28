@@ -23,6 +23,7 @@ members = [
     "crates/app/ut-ui",
     "crates/app/ut-cli",
     "crates/app/ut-tui",
+    "crates/app/ut-gui",
     "crates/app/ut-app",
 ]
 

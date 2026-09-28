@@ -1,0 +1,23 @@
+[package]
+name = "ut-gui"
+description = "Native windowed GUI front end (Section 4 'Windows'): the real OS window this app has been missing, over the same ut-tui/ut-session/ut-ui core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ut-gui"
+path = "src/main.rs"
+
+[lib]
+name = "ut_gui"
+path = "src/lib.rs"
+
+[dependencies]
+ut-tui = { path = "../ut-tui" }
+ut-grid = { path = "../../core/ut-grid" }
+ut-ui = { path = "../ut-ui" }
+ut-input = { path = "../ut-input" }
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+egui = "0.29"
+image = { version = "0.25", default-features = false, features = ["png"] }
