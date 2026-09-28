@@ -1,0 +1,8 @@
+[package]
+name = "ut-ui"
+description = "Toolkit-agnostic UI layout models — starting with the pane split tree (Section 4 'Panes') — that a real GUI toolkit renders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "ut-ansi"
+description = "ANSI/VT escape-sequence parser: turns a raw byte stream into typed, owned terminal events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vte = "0.13"
+
+[dev-dependencies]

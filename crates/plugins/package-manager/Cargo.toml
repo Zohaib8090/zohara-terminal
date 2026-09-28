@@ -1,0 +1,12 @@
+[package]
+name = "ut-plugin-package-manager"
+description = "Package-management plugin (Section 11): parses pacman/checkupdates transaction output into structured previews"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-plugin-api = { path = "../ut-plugin-api" }
+
+[dev-dependencies]
+ut-safety = { path = "../../core/ut-safety" }

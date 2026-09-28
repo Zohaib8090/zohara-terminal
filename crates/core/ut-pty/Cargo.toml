@@ -1,0 +1,12 @@
+[package]
+name = "ut-pty"
+description = "PTY spawn/read/write/resize — the sole OS-process boundary of the terminal-core layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nix = { version = "0.29", features = ["term", "process", "fs", "signal"] }
+libc = "0.2"
+
+[dev-dependencies]

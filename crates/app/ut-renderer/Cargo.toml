@@ -1,0 +1,9 @@
+[package]
+name = "ut-renderer"
+description = "Grid-to-output rendering: ANSI reproduction and damage/diff tracking (Section 17 'Render batching'), toolkit-agnostic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-grid = { path = "../../core/ut-grid" }

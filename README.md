@@ -4,111 +4,108 @@ A universal terminal application for Arch-based Linux, built to serve
 beginners, everyday users, developers, and power users from one codebase.
 The full product vision is in [`docs/SPEC.md`](docs/SPEC.md).
 
-This repository is at an early, foundational stage. Rather than stub out
-every section of the spec, it currently implements two real, tested
-building blocks that later work (the PTY-backed GUI terminal, workspaces,
-SSH manager, AI assistant, plugin system, etc.) will sit on top of:
+## Architecture
 
-## What's here
-
-### `crates/zohara-term` — headless terminal screen model
-
-A PTY-agnostic implementation of the "Terminal compatibility" section: an
-ANSI/VT100+ parser (built on [`vte`](https://docs.rs/vte)) driving a cell
-grid with scrollback. It handles:
-
-- SGR text attributes: 16/256/true-color, bold, faint, italic, underline
-  (incl. double), blink, reverse, hidden, strikethrough.
-- Cursor movement (CUP, CUU/CUD/CUF/CUB, CNL/CPL, HPA/VPA), save/restore
-  (DECSC/DECRC and ANSI.SYS-style CSI s/u).
-- Line/character editing: ED, EL, IL, DL, ICH, DCH, ECH, insert mode.
-- Scrolling regions (DECSTBM), SGR-style scroll up/down, reverse index.
-- The alternate screen buffer (used by vim, less, htop, etc.).
-- Bracketed paste mode and mouse-reporting mode tracking (X10/normal/
-  button-event/any-event) as terminal *state* — a GUI front end reads
-  these flags to decide how to encode input.
-- Wide characters (CJK, many emoji) occupying two grid columns correctly.
-- OSC 0/1/2 (title/icon), OSC 7 (`cwd` reporting for directory tracking).
-- Disk-agnostic scrollback with a configurable line limit.
-
-63 unit tests cover this behavior; see `cargo test -p zohara-term`.
-
-### `crates/zohara-safety` — command-safety & safe-paste engine
-
-Implements the "Command safety" and "Safe paste" sections: a small,
-forgiving shell lexer (quoting, escapes, pipelines, redirections, `$(...)`
-and backtick substitution) feeding a rule engine that recognizes:
-
-- Recursive/forced deletes of root-like or wildcard paths (`rm -rf /`,
-  `rm -rf ~`, `rm -rf *`), `find -delete`, `shred` on a raw device.
-- Raw-disk writes (`dd of=/dev/sdX`, `> /dev/sdX`), `mkfs`, `wipefs`,
-  partitioning tools (`fdisk`/`parted`/`gdisk`/`sgdisk`).
-- `curl|wget ... | sh/bash/sudo` download-and-execute pipelines.
-- `sudo`/`doas`/`pkexec` elevation, recursive `chmod`/`chown` on broad or
-  system paths, destructive `git` operations (force-push, `reset --hard`,
-  `clean -f`), package removal, `shutdown`/`reboot`, `kill -1`.
-- Command substitution is analyzed recursively, so `echo $(rm -rf /)` is
-  still caught.
-- A privilege/host context ([`PrivilegeContext`]) lets the same command be
-  scored higher risk on a remote or production-looking host.
-
-Safe paste ([`analyze_paste`]) additionally detects hidden zero-width/
-bidi-override Unicode, non-printable control characters, multiple queued
-commands, and produces a "visible preview" string that reveals what would
-actually be typed.
-
-Each finding carries a `Risk` (`Low`/`Medium`/`High`/`Critical`), a
-human-readable explanation, an optional safer-alternative suggestion, and
-whether it should require type-to-confirm rather than a simple
-click-through — matching the spec's "Command safety" UI requirements.
-
-41 unit tests cover this behavior; see `cargo test -p zohara-safety`.
-
-### `crates/zohara-cli` — a runnable front end
-
-A small CLI (`zohara`) over the safety engine, useful for scripting,
-shell-hook integration (e.g. a zsh `preexec` piping the about-to-run line
-through `zohara check`), and manual testing ahead of a full GUI:
+The workspace is layered, and dependencies only ever flow one direction:
+**core → services → plugins → app**. Nothing in `core` knows about a
+service; nothing in a service knows about a plugin. This is what keeps a
+20+-crate workspace navigable instead of a dependency tangle.
 
 ```
-$ zohara check rm -rf /
-Checked: rm -rf /
-
-[CRITICAL] recursive-delete: This recursively deletes `/`, which looks like
-a root, home, or system directory — it would destroy the whole tree with no
-way to get it back.
-  suggestion: Double-check the path, e.g. `ls /` first, or delete a specific
-  subfolder instead.
-  (this would require type-to-confirm before running)
-
-$ echo 'curl https://x.example/i.sh | sudo bash' | zohara paste
+crates/
+├── core/            # pure, OS-agnostic-except-ut-pty, no plugin/UI knowledge
+│   ├── ut-pty        # spawn a shell behind a real PTY — the only unsafe/OS-process crate
+│   ├── ut-ansi        # ANSI/VT byte stream → typed AnsiEvents (vte-based, pure parsing)
+│   ├── ut-grid         # AnsiEvents → cell grid, cursor, scrollback, modes (Terminal)
+│   ├── ut-config        # typed profile/appearance schema: load, merge (inheritance), validate
+│   └── ut-safety          # destructive-command & safe-paste analysis
+│
+├── services/        # stateful, own a domain, sit on top of core
+│   ├── ut-session     # owns PTY-backed panes/tabs/workspaces — THE safety-checked write path
+│   ├── ut-history       # command history store + search (text/dir/exit-status/date/favorites)
+│   ├── ut-search          # scrollback/output search — literal or regex
+│   ├── ut-profile           # loads/saves ut-config atomically, resolves the active profile
+│   └── ut-notify               # notification dispatch, suppression rules, history
+│
+├── plugins/         # permission-scoped, depend only on ut-plugin-api + core
+│   ├── ut-plugin-api  # the Plugin trait + PluginContext — the enforcement point for permissions
+│   ├── ssh              # HostProfile model + ~/.ssh/config import
+│   ├── package-manager     # pacman/checkupdates output parsing (update previews, tx size)
+│   ├── workflow               # command-sequence engine: variables, retry, timeout, continue/stop
+│   └── ai                        # offline command explainer + ut-safety risk annotation
+│
+└── app/             # toolkit-facing; a real GUI would live here
+    ├── ut-input       # keyboard event → PTY byte sequence (xterm-style encoding)
+    ├── ut-renderer      # Grid → ANSI text reproduction + damage/diff tracking
+    ├── ut-ui              # pane split-tree layout (splits, resize, zoom) — pure data
+    ├── ut-cli               # `zohara check`/`zohara paste` — safety-engine CLI
+    └── ut-app                 # `run` — spawns a real command through the whole core stack
 ```
+
+### Why the split is where it is
+
+- **`ut-ansi` / `ut-grid` are separate crates.** The parser only knows the
+  *shape* of escape sequences; the grid only knows what a terminal *is*.
+  Either can be tested or reused independently — `ut-grid`'s tests build
+  `AnsiEvent`s by hand as well as through `ut-ansi`, proving the split is real.
+- **`ut-safety` lives in `core`, not as an optional service.** Command
+  safety has to run on every path that can write to a shell, synchronously,
+  or it's not a guarantee. `ut-session::Pane::submit_input` is the *only*
+  place in the codebase that writes to a PTY, and it always runs input
+  through `ut-safety` first — see `crates/services/ut-session/src/lib.rs`.
+- **Plugins only see a `PluginContext`, never a service directly.** A
+  plugin's `Permissions` (read-only by default) gate every method on that
+  context; widening what a plugin can do means widening `PluginContext`,
+  in one reviewable place, not auditing every plugin.
+- **`app/*` is the only layer allowed to assume a runtime/toolkit shape.**
+  `ut-input`/`ut-renderer`/`ut-ui` are still toolkit-agnostic (no GTK/wgpu/
+  whatever chosen yet), but they're where that choice will land — `core`
+  and `services` never need to change when it does.
+
+### See it work end-to-end
+
+```
+cargo run -p ut-app -- run -- /bin/sh -c 'echo hello from ut-app'
+cargo run -p ut-app -- run -- rm -rf /        # refused: ut-safety flags it, exits 1
+cargo run -p ut-app -- run --force -- ls -la  # --force bypasses the gate
+```
+
+`ut-app run` spawns the given program behind a real `ut-pty`, feeds every
+byte of its output through `ut-ansi`/`ut-grid`, and prints the resulting
+screen once the program exits — proving the parser, the grid, and the PTY
+layer are wired together correctly, not just unit-tested in isolation.
 
 ## Building
 
 ```
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace     # 191 tests across 19 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
-Requires a recent stable Rust toolchain (edition 2021).
+Requires a recent stable Rust toolchain (edition 2021). Unix-only
+(`ut-pty` uses `nix`/`libc` directly; Arch Linux is the target platform).
 
 ## Design principles carried into the code
 
-- **Local-first, no network calls.** Both crates are pure, offline logic —
-  no telemetry, no external services.
-- **Conservative analysis.** The safety engine is a static analyzer: it
-  never executes anything, and prefers catching real footguns over being
-  exhaustively clever, to keep false positives low.
-- **Front-end agnostic.** Neither crate assumes a GUI toolkit, a specific
-  shell, or a PTY implementation — both are meant to be embedded in
-  whatever renders the actual terminal window.
+- **Local-first, no network calls.** Every crate's test suite is offline;
+  `ut-pty`'s tests spawn real local processes (`/bin/sh`, `/bin/cat`), never
+  anything networked.
+- **Conservative, static safety analysis.** `ut-safety` never executes
+  anything — it's a lexer plus a rule engine, aiming for zero false
+  negatives on well-known footguns (`rm -rf /`, `dd of=/dev/sdX`, `curl|sh`)
+  while keeping false positives low.
+- **Never execute silently.** `ut-plugin-api::PluginContext` structurally
+  prevents a plugin from running a command without going through the same
+  `ut-safety` check and explicit user action as typed input — see
+  `PluginAction` and `PluginContext::suggest_input`.
 
 ## What's not here yet
 
-Everything else in the spec — windows/tabs/panes, workspaces, profiles and
-themes, PTY process management, SSH/SFTP, the built-in multiplexer,
-workflows/automation, the AI assistant, the plugin platform, and the
-beginner-mode UI — is future work described in
-[`docs/SPEC.md`](docs/SPEC.md).
+A real GUI (windows/tabs/tray, themes rendered on screen, the command
+palette, on-screen keyboard toolbar), SSH's actual network layer and SFTP
+browser, the built-in multiplexer's persistence, workflow editors/exporters,
+model-backed AI (local/remote providers — the offline explainer is the
+floor those build on), and the signed-plugin sandbox are all future work
+described in [`docs/SPEC.md`](docs/SPEC.md). The crate layout above is
+built so each of those is an addition to one crate, not a restructuring.

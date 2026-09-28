@@ -1,0 +1,9 @@
+[package]
+name = "ut-search"
+description = "Output/scrollback search: literal and regex, case-sensitive or not (Section 7 'Output search')"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = "1"

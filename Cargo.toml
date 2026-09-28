@@ -1,6 +1,27 @@
 [workspace]
 resolver = "2"
-members = ["crates/zohara-safety", "crates/zohara-term", "crates/zohara-cli"]
+members = [
+    "crates/core/ut-pty",
+    "crates/core/ut-ansi",
+    "crates/core/ut-grid",
+    "crates/core/ut-config",
+    "crates/core/ut-safety",
+    "crates/services/ut-session",
+    "crates/services/ut-history",
+    "crates/services/ut-search",
+    "crates/services/ut-profile",
+    "crates/services/ut-notify",
+    "crates/plugins/ut-plugin-api",
+    "crates/plugins/ssh",
+    "crates/plugins/package-manager",
+    "crates/plugins/workflow",
+    "crates/plugins/ai",
+    "crates/app/ut-renderer",
+    "crates/app/ut-input",
+    "crates/app/ut-ui",
+    "crates/app/ut-cli",
+    "crates/app/ut-app",
+]
 
 [workspace.package]
 version = "0.1.0"

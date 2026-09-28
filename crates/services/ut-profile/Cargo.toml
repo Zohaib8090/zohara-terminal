@@ -1,0 +1,9 @@
+[package]
+name = "ut-profile"
+description = "Loads/saves ut-config from disk and resolves the active profile (Section 5 'Profiles')"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-config = { path = "../../core/ut-config" }

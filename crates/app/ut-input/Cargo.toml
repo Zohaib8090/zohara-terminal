@@ -1,0 +1,8 @@
+[package]
+name = "ut-input"
+description = "Keyboard/mouse event to PTY byte-sequence encoding (Section 6), independent of any GUI toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

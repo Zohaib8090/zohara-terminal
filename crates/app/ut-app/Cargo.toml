@@ -1,0 +1,16 @@
+[package]
+name = "ut-app"
+description = "Wires terminal-core + services together into a runnable demo: spawn a command behind a PTY, render it through ut-grid, print the result"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ut-app"
+path = "src/main.rs"
+
+[dependencies]
+ut-pty = { path = "../../core/ut-pty" }
+ut-grid = { path = "../../core/ut-grid" }
+ut-safety = { path = "../../core/ut-safety" }
+ut-renderer = { path = "../ut-renderer" }

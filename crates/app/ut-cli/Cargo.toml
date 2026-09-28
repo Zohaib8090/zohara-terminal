@@ -1,0 +1,13 @@
+[package]
+name = "ut-cli"
+description = "Command-line front end for Zohara Terminal's core crates (safety checks now; PTY-driven session control as it lands)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zohara"
+path = "src/main.rs"
+
+[dependencies]
+ut-safety = { path = "../../core/ut-safety" }

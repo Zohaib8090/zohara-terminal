@@ -1,0 +1,13 @@
+[package]
+name = "ut-config"
+description = "Typed configuration schema: load, merge, and validate profiles/appearance/behavior settings from TOML"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+
+[dev-dependencies]

@@ -1,0 +1,8 @@
+[package]
+name = "ut-notify"
+description = "Notification dispatch (Section 21 'System notifications'): kinds, suppression rules, and a pluggable sink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

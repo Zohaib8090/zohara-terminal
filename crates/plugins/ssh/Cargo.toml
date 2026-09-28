@@ -1,0 +1,12 @@
+[package]
+name = "ut-plugin-ssh"
+description = "SSH/SFTP plugin (Section 12) — connection profiles, jump hosts, port forwarding, remote directory tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-plugin-api = { path = "../ut-plugin-api" }
+
+[dev-dependencies]
+ut-safety = { path = "../../core/ut-safety" }

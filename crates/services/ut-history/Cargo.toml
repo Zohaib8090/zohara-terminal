@@ -1,0 +1,8 @@
+[package]
+name = "ut-history"
+description = "Shell command history store and search (Section 7 'History')"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

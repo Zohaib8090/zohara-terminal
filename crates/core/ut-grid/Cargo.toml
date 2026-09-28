@@ -1,0 +1,10 @@
+[package]
+name = "ut-grid"
+description = "Terminal screen state: cell grid, cursor, scrollback, and modes, driven by ut-ansi events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-ansi = { path = "../ut-ansi" }
+unicode-width = "0.2"

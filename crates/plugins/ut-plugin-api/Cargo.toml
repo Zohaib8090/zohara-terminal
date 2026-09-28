@@ -1,0 +1,9 @@
+[package]
+name = "ut-plugin-api"
+description = "The trait/contract every Zohara Terminal plugin implements — permission-scoped by construction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-safety = { path = "../../core/ut-safety" }
