@@ -31,7 +31,7 @@ crates/
 ├── plugins/         # permission-scoped, depend only on ut-plugin-api + core
 │   ├── ut-plugin-api  # the Plugin trait + PluginContext — the enforcement point for permissions
 │   ├── ut-plugin-signing # ed25519 manifest signing/verification against a trusted keyring
-│   ├── ssh                 # HostProfile + ~/.ssh/config import + a real ssh2-backed SshClient
+│   ├── ssh                 # HostProfile + config import + SshClient (connect/exec), SFTP, port forwarding
 │   ├── package-manager        # pacman/checkupdates output parsing (update previews, tx size)
 │   ├── workflow                   # command-sequence engine: variables, retry, timeout, continue/stop
 │   └── ai                            # offline explainer + optional Ollama-backed NetworkAssistant
@@ -72,6 +72,13 @@ crates/
   model.** Each named session is a genuine background thread pumping a
   real PTY, independent of any attached client — detach/reattach is a
   socket disconnect/reconnect, not a special mode.
+- **Port forwarding gets one thread per tunnel, not one per connection.**
+  libssh2 requires every channel on one `Session` to be accessed from a
+  single thread (concurrent access from different threads is undefined
+  behavior) — so `ut-plugin-ssh::forward` gives each active `local_forward`/
+  `remote_forward` a dedicated, non-blocking session and cooperatively
+  multiplexes every tunnelled connection on that one thread, rather than
+  reaching for a `Mutex<Session>` and fighting libssh2's threading model.
 - **`app/*` is the only layer allowed to assume a runtime/toolkit shape,
   and `ut-gui` is the payoff of that boundary.** `ut-tui`'s `App` (panes,
   split layout, the safety-gated input line) has zero ratatui-specific
@@ -129,11 +136,13 @@ platform). `ut-gui` additionally needs a windowing system at *run* time
 (X11/Wayland — a real desktop, or `Xvfb`/similar for a headless box) but
 not at *build* time; `cargo build`/`test`/`clippy` for it need no display.
 
-`ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`
-against a real server) are `#[ignore]`d by default so `cargo test
---workspace` never depends on network access or a running `sshd` — they
-were verified in development against a real local test `sshd`. Run them
-yourself against your own test server with:
+`ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`, the
+SFTP round trip, and both `local_forward`/`remote_forward`, against a real
+server) are `#[ignore]`d by default so `cargo test --workspace` never
+depends on network access or a running `sshd` — they were verified in
+development against a real local test `sshd` (with `AllowTcpForwarding
+yes` for the forwarding tests). Run them yourself against your own test
+server with:
 
 ```
 cargo test -p ut-plugin-ssh -- --ignored
@@ -169,13 +178,15 @@ cargo test -p ut-plugin-ssh -- --ignored
 `ut-gui` gives the project a real native window, but it's still one plain
 window — no multi-window/tray/dropdown/PiP modes, no themes-as-settings
 (colors are hardcoded), no mouse-driven resize/drag for panes (only the
-Ctrl+B keyboard prefix), no font/appearance picker. SSH's SFTP browser and
-port forwarding are still missing (the `SshClient` foundation they'd
-extend already exists in `ut-plugin-ssh::client`). Workflow editors/
-exporters, actual dynamic plugin loading (signing/verification exists in
-`ut-plugin-signing`; loading a `.so` behind that check is still future
-work), and llama.cpp/remote-provider AI backends (Ollama is implemented;
-the `AiProvider` trait is what a second backend implements) round out the
+Ctrl+B keyboard prefix), no font/appearance picker. SSH now has a real
+`SshClient`, SFTP browser, and local/remote port forwarding — still
+missing: dynamic (SOCKS) forwarding and ProxyJump chaining (see
+`ut-plugin-ssh::forward`'s module docs for why dynamic forwarding
+specifically was scoped out). Workflow editors/exporters, actual dynamic
+plugin loading (signing/verification exists in `ut-plugin-signing`;
+loading a `.so` behind that check is still future work), and
+llama.cpp/remote-provider AI backends (Ollama is implemented; the
+`AiProvider` trait is what a second backend implements) round out the
 list — all described in [`docs/SPEC.md`](docs/SPEC.md). The crate layout
 above is built so each of those is an addition to one crate, not a
 restructuring.

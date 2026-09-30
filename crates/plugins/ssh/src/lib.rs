@@ -2,19 +2,24 @@
 //!
 //! What's implemented: the [`HostProfile`] data model (saved hosts,
 //! groups, tags, jump hosts, port/identity fields) and a parser for
-//! OpenSSH's `~/.ssh/config` format ("SSH config import"); and, in the
-//! [`client`] module, a real SSH client ([`client::SshClient`], built on
-//! `ssh2`/libssh2) — connect, known-hosts verification, authenticate
-//! (password/key file/key material/agent), and run a command. See
-//! [`client`]'s module docs for how its live-connection tests are run
-//! (they need a reachable `sshd` and are `#[ignore]`d by default, but were
-//! verified against a real local test server in development).
+//! OpenSSH's `~/.ssh/config` format ("SSH config import"); a real SSH
+//! client ([`client::SshClient`], built on `ssh2`/libssh2) — connect,
+//! known-hosts verification, authenticate (password/key file/key
+//! material/agent), and run a command; an SFTP browser ([`sftp`] —
+//! list/upload/download/mkdir/rmdir/remove/rename) over that same
+//! connection; and local/remote TCP port forwarding ([`forward`]).
+//! See [`client`]'s module docs for how the live-connection tests across
+//! all three modules are run (they need a reachable `sshd` and are
+//! `#[ignore]`d by default, but were verified against a real local test
+//! server in development, `forward`'s with `AllowTcpForwarding yes`).
 //!
-//! Not yet implemented: port forwarding and the SFTP browser — `ssh2`
-//! supports both (`Channel` direct-tcpip and `Sftp`), so adding them is an
-//! extension of `client.rs`, not a new architecture.
+//! Not yet implemented: dynamic (SOCKS) forwarding and ProxyJump chaining
+//! — see [`forward`]'s module docs for why dynamic forwarding specifically
+//! is scoped out for now.
 
 pub mod client;
+pub mod forward;
+pub mod sftp;
 
 use std::collections::HashMap;
 use ut_plugin_api::{Permissions, Plugin, PluginAction, PluginContext};

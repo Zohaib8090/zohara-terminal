@@ -72,7 +72,7 @@ pub enum SshError {
 }
 
 pub struct SshClient {
-    session: Session,
+    pub(crate) session: Session,
 }
 
 /// Map libssh2's `HostKeyType` to the algorithm name `known_hosts` files
