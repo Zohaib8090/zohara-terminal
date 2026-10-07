@@ -6,9 +6,15 @@
 //! runs one command and reports back an exit code, so it can be driven by
 //! `ut-session::Pane::submit_input` in the app layer (going through the
 //! same safety checks as anything else) without this crate depending on
-//! `ut-pty`/`ut-session` at all. What's not implemented yet: the visual/
-//! text workflow *editor*, scheduling, and the exporters to Bash/Fish/Zsh/
-//! PowerShell/YAML/JSON — this crate is the execution model those will sit on.
+//! `ut-pty`/`ut-session` at all. Also in this crate: [`text_format`]
+//! (JSON/YAML round-tripping — the data layer under "Text workflow
+//! editor") and [`export`] (standalone Bash/Zsh/Fish/PowerShell script
+//! generation, with the Bash/Zsh/Fish generators actually run through the
+//! real shells in tests). What's not implemented yet: a visual workflow
+//! editor and scheduling.
+
+pub mod export;
+pub mod text_format;
 
 use std::collections::HashMap;
 use std::time::Duration;

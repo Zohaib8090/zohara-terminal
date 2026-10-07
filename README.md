@@ -33,7 +33,7 @@ crates/
 │   ├── ut-plugin-signing # ed25519 manifest signing/verification against a trusted keyring
 │   ├── ssh                 # HostProfile + config import + SshClient (connect/exec), SFTP, port forwarding
 │   ├── package-manager        # pacman/checkupdates output parsing (update previews, tx size)
-│   ├── workflow                   # command-sequence engine: variables, retry, timeout, continue/stop
+│   ├── workflow                   # command-sequence engine + JSON/YAML round-trip + Bash/Zsh/Fish/PowerShell export
 │   └── ai                            # offline explainer + optional Ollama-backed NetworkAssistant
 │
 └── app/             # toolkit-facing
@@ -79,6 +79,14 @@ crates/
   `remote_forward` a dedicated, non-blocking session and cooperatively
   multiplexes every tunnelled connection on that one thread, rather than
   reaching for a `Mutex<Session>` and fighting libssh2's threading model.
+- **A workflow exporter is only trustworthy if the output actually runs.**
+  `ut-plugin-workflow::export`'s Bash/Zsh/Fish generators aren't just
+  string templates checked by eye — their tests write the generated
+  script to disk and run it through the real `bash`/`zsh`/`fish` binary,
+  asserting on exit codes and a scratch-file counter to prove retry, stop-
+  on-failure, continue-on-failure, timeout, and `{{VAR}}` substitution all
+  behave the way the doc comment claims. PowerShell's generator is
+  structural-only (no `pwsh` in this environment) and documented as such.
 - **`app/*` is the only layer allowed to assume a runtime/toolkit shape,
   and `ut-gui` is the payoff of that boundary.** `ut-tui`'s `App` (panes,
   split layout, the safety-gated input line) has zero ratatui-specific
@@ -125,7 +133,7 @@ xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/out.png \
 
 ```
 cargo build --workspace
-cargo test --workspace     # 254 tests across 24 crates, all offline/hermetic
+cargo test --workspace     # 278 tests across 24 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
@@ -135,6 +143,11 @@ Unix-only (`ut-pty` uses `nix`/`libc` directly; Arch Linux is the target
 platform). `ut-gui` additionally needs a windowing system at *run* time
 (X11/Wayland — a real desktop, or `Xvfb`/similar for a headless box) but
 not at *build* time; `cargo build`/`test`/`clippy` for it need no display.
+`ut-plugin-workflow`'s export tests run the scripts they generate through
+real `bash`/`zsh`/`fish` binaries when available, for a genuine behavioral
+check rather than just inspecting the generated text — but each one skips
+cleanly (not a failure) if that particular shell isn't installed, so
+`cargo test --workspace` still passes on a machine with only `bash`.
 
 `ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`, the
 SFTP round trip, and both `local_forward`/`remote_forward`, against a real
