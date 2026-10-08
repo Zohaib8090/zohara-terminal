@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zohara Terminal
+Comment=Universal terminal application for Arch-based Linux
+Exec=ut-gui
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true

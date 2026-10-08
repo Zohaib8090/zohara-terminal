@@ -188,6 +188,34 @@ cargo test -p ut-plugin-ssh -- --ignored
 #  127.0.0.1:2222 / root / /tmp/sshd_test/client_key)
 ```
 
+## Installing a real package (this is the part meant to actually be tried)
+
+Everything above proves the code against itself — real PTYs, a real
+`sshd`, real screenshots. It doesn't prove the *app* is something you can
+install and use. `PKGBUILD` at the repo root closes that gap: it builds
+all four binaries in release mode and packages them as a real Arch
+package, installed the normal way:
+
+```sh
+# on an Arch (or Arch-based) machine, from a clone of this repo:
+makepkg -si      # builds + installs zohara-terminal, prompting for pacman -U
+```
+
+That installs `ut-tui` (the actual terminal — also reachable as
+`zohara-terminal`), `ut-gui` (the native windowed front end, with a
+`.desktop` entry so it shows up in an app launcher), `zohara` (the
+standalone safety-check CLI), and `ut-app` (a minimal PTY demo, not meant
+for daily use).
+
+`.github/workflows/package.yml` runs the exact same `makepkg` build
+inside a real `archlinux:latest` container on every push — not a
+cross-compile, not a dry run — then `pacman -U`s the result and actually
+runs `zohara`/`ut-app` from the installed package before uploading it as
+a downloadable workflow artifact (`zohara-terminal-pkg-<commit>`,
+`Actions` tab → the run → `Artifacts`). That artifact is a real
+`.pkg.tar.zst` you can download and `pacman -U` on your own Arch machine
+without needing a Rust toolchain at all.
+
 ## Design principles carried into the code
 
 - **Local-first, no network calls in the default test suite.** `ut-pty`'s

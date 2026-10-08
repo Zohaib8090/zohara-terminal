@@ -1,0 +1,68 @@
+name: Build Arch package
+
+# Builds the PKGBUILD at the repo root inside a real archlinux container
+# (not cross-compiled, not simulated) and uploads the resulting
+# .pkg.tar.zst as a workflow artifact — something installable with
+# `pacman -U`, not just "the tests passed". Runs on every push to this
+# branch, on PRs that touch packaging-relevant files, and on demand.
+on:
+  push:
+    branches:
+      - claude/upbeat-sagan-bfhhua
+      - main
+  pull_request:
+    paths:
+      - 'PKGBUILD'
+      - 'packaging/**'
+      - '.github/workflows/package.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install base-devel, rust, and every PKGBUILD dependency
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust \
+            openssl libxkbcommon libxcb libx11 mesa pkgconf
+          # Every depends()/makedepends() in PKGBUILD is now already
+          # installed system-wide, so makepkg below needs no --syncdeps
+          # (and therefore no root/sudo access for the unprivileged
+          # builder user makepkg insists on running as).
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: makepkg refuses to run as root — create an unprivileged builder
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build the package with makepkg
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg --noconfirm --skippgpcheck"
+
+      - name: Show what got built
+        run: |
+          ls -lh "$GITHUB_WORKSPACE"/*.pkg.tar.zst
+          pacman -Qlp "$GITHUB_WORKSPACE"/*.pkg.tar.zst
+
+      - name: Smoke-test the package's binaries actually run
+        run: |
+          pacman -U --noconfirm "$GITHUB_WORKSPACE"/*.pkg.tar.zst
+          zohara check "rm -rf /" | grep -qi critical
+          ut-app run -- echo hello | grep -qi hello
+          echo "installed package's binaries ran for real, not just built"
+
+      - name: Upload the package as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zohara-terminal-pkg-${{ github.sha }}
+          path: '*.pkg.tar.zst'
+          if-no-files-found: error
+          retention-days: 30
