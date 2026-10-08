@@ -228,15 +228,18 @@ wired to it, neither built yet. SSH now has a real
 `SshClient`, SFTP browser, and local/remote port forwarding — still
 missing: dynamic (SOCKS) forwarding and ProxyJump chaining (see
 `ut-plugin-ssh::forward`'s module docs for why dynamic forwarding
-specifically was scoped out). Dynamic plugin loading now works
-end-to-end (`ut-plugin-loader::load_verified` won't open a `.so` whose
-signature/hash don't check out against `ut-plugin-signing::Keyring`) but
-nothing above it is wired up yet — no on-disk plugin directory scan, no
-`ut-session`/`ut-tui`/`ut-gui` integration turning a `LoadedPlugin` into
-calls on `on_command`/`on_output` as real input/output flows through, and
-a dynamically-loaded plugin still can't see a `PluginContext` (by
-design — see that crate's module docs) so it can't yet do anything an
-in-process plugin couldn't do more simply. A visual workflow editor and a
+specifically was scoped out). Dynamic plugin loading is now wired all the
+way into `ut-tui::App`: `App::load_plugins_from_dir` scans a directory for
+signed `.so`/`.manifest.json` pairs, verifies and loads each via
+`ut-plugin-loader`, then actually drives them — every command gets an
+`on_command` call right after this app's own safety gate forwards it, and
+every raw output chunk gets `on_output` via `pump_all`. A dynamically-
+loaded plugin still can't see a `PluginContext` and can't cause a command
+to run (even `RunCommand` is only logged, never executed — no write-access
+grant exists for dynamic plugins in this version; see `ut-plugin-loader`'s
+module docs for why). `ut-gui` doesn't call this yet — it reuses
+`ut-tui::App` unmodified, so the wiring is already available to it, just
+not exposed as a CLI flag/menu item there. A visual workflow editor and a
 llama.cpp/remote-provider AI backend (Ollama is implemented; the
 `AiProvider` trait is what a second backend implements) round out the
 list — all described in [`docs/SPEC.md`](docs/SPEC.md). The crate layout

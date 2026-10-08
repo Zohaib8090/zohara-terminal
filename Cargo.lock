@@ -3108,8 +3108,12 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+ "serde_json",
  "ut-grid",
  "ut-input",
+ "ut-plugin-api",
+ "ut-plugin-loader",
+ "ut-plugin-signing",
  "ut-safety",
  "ut-session",
  "ut-ui",

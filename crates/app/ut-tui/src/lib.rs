@@ -25,6 +25,20 @@
 //! integration (a preexec/precmd hook) — that remains future work, noted
 //! in the spec's beginner-mode "Destructive-command warnings" section.
 
+//! # Dynamic plugins (read before extending this integration)
+//!
+//! `App::load_plugins_from_dir` loads `<name>.so` + `<name>.manifest.json`
+//! pairs through `ut-plugin-loader::load_verified` — nothing runs unless
+//! its artifact hash and signature check out against a key `App::
+//! trust_plugin_publisher` was told to trust. A loaded plugin sees every
+//! command right after this app's own safety gate decides to forward it
+//! (`notify_plugins_of_command`), and every raw output chunk via
+//! `pump_all`. It can never cause a command to run, even via
+//! `PluginAction::RunCommand` — dynamic plugins have no `PluginContext`
+//! and no write-access grant in this version (see `ut-plugin-loader`'s
+//! module docs for why), so every action besides `ShowMessage` is logged
+//! to `plugin_messages` as a suggestion, not executed.
+
 mod render;
 mod ui;
 
@@ -32,8 +46,12 @@ pub use render::{grid_to_text, pane_border_style};
 pub use ui::draw;
 
 use std::collections::HashMap;
+use std::path::Path;
 use ut_grid::Terminal as GridTerminal;
 use ut_input::{encode, EncodeModes, Key, Modifiers};
+use ut_plugin_api::PluginAction;
+use ut_plugin_loader::LoadedPlugin;
+use ut_plugin_signing::{Keyring, SignedManifest};
 use ut_safety::{PrivilegeContext, Report};
 use ut_session::{InputOutcome, Pane, Tab};
 use ut_ui::{Direction as SplitDirection, Layout, LayoutState};
@@ -59,6 +77,16 @@ pub struct App {
     privilege: PrivilegeContext,
     next_id: u64,
     pub should_quit: bool,
+    /// Dynamically-loaded plugins (see `ut-plugin-loader`), driven from
+    /// `handle_key`'s Enter path (`on_command`) and `pump_all` (`on_output`).
+    plugins: Vec<LoadedPlugin>,
+    /// Publisher keys this app instance trusts for loading plugins.
+    plugin_keyring: Keyring,
+    /// Human-readable log of plugin activity: load successes/failures and
+    /// every `ShowMessage`/`SuggestCommand`/`RunCommand` a plugin returned.
+    /// A front end surfaces this however it likes (status line, toast,
+    /// side panel) — `App` itself has no UI opinion.
+    pub plugin_messages: Vec<String>,
 }
 
 impl App {
@@ -75,7 +103,69 @@ impl App {
             privilege,
             next_id: 2,
             should_quit: false,
+            plugins: Vec::new(),
+            plugin_keyring: Keyring::new(),
+            plugin_messages: Vec::new(),
         })
+    }
+
+    /// Trust a publisher's signing key for dynamically-loaded plugins.
+    /// Must be called before [`App::load_plugins_from_dir`] for that
+    /// publisher's plugins to pass verification — see
+    /// `ut-plugin-signing::Keyring::trust`.
+    pub fn trust_plugin_publisher(&mut self, public_key_hex: &str, label: &str) {
+        let _ = self.plugin_keyring.trust(public_key_hex, label);
+    }
+
+    /// Scan `dir` for `<name>.so` files with a sibling `<name>.manifest.json`
+    /// holding a JSON-encoded `ut_plugin_signing::SignedManifest`, and load
+    /// the ones that verify against this app's trusted keyring via
+    /// `ut_plugin_loader::load_verified`. A plugin that's missing its
+    /// manifest, fails to parse, or fails verification is skipped — not
+    /// fatal to the rest of the scan — with the reason recorded in
+    /// [`App::plugin_messages`]. Returns how many plugins actually loaded.
+    ///
+    /// # Safety
+    /// This loads and executes native code from every verified `.so` in
+    /// `dir`. Only point it at a directory the user actually intends to
+    /// load plugins from — verification proves a plugin is untampered and
+    /// from a trusted publisher, not that the publisher's code is safe to
+    /// run unsupervised (see `ut-plugin-loader`'s module docs).
+    pub unsafe fn load_plugins_from_dir(&mut self, dir: &Path) -> usize {
+        let mut loaded = 0;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            self.plugin_messages.push(format!("plugin directory unreadable: {}", dir.display()));
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("so") {
+                continue;
+            }
+            match load_one_plugin(&path, &self.plugin_keyring) {
+                Ok(plugin) => {
+                    self.plugin_messages.push(format!("loaded plugin: {}", plugin.id()));
+                    self.plugins.push(plugin);
+                    loaded += 1;
+                }
+                Err(reason) => self.plugin_messages.push(format!("plugin not loaded ({}): {reason}", path.display())),
+            }
+        }
+        loaded
+    }
+
+    /// Notify every loaded plugin that `command` is about to run (after
+    /// this app's own safety gate already decided to forward it) and
+    /// record whatever `PluginAction` each one returns. A plugin can never
+    /// cause a command to run by returning `RunCommand` here — dynamic
+    /// plugins have no write-access permission grant in this version, so
+    /// it's surfaced as a message, never executed, matching "never execute
+    /// silently" for in-process plugins too.
+    fn notify_plugins_of_command(&mut self, command: &str) {
+        for plugin in &mut self.plugins {
+            let action = plugin.on_command(command);
+            record_plugin_action(&mut self.plugin_messages, &action);
+        }
     }
 
     fn active_pane_id(&self) -> Option<u64> {
@@ -88,8 +178,25 @@ impl App {
     /// will stall on whichever pane has no output ready.
     pub fn pump_all(&mut self) {
         let mut buf = [0u8; 8192];
+        let has_plugins = !self.plugins.is_empty();
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
         for pane in self.tab.panes_mut() {
-            let _ = pane.pump_output(&mut buf);
+            if has_plugins {
+                if let Ok(Some(data)) = pane.pump_output_captured(&mut buf) {
+                    if !data.is_empty() {
+                        chunks.push(data.to_vec());
+                    }
+                }
+            } else {
+                let _ = pane.pump_output(&mut buf);
+            }
+        }
+        for chunk in &chunks {
+            let text = String::from_utf8_lossy(chunk);
+            for plugin in &mut self.plugins {
+                let action = plugin.on_output(&text);
+                record_plugin_action(&mut self.plugin_messages, &action);
+            }
         }
     }
 
@@ -179,6 +286,9 @@ impl App {
                 } else {
                     self.forward_raw(id, key, mods);
                     self.pending_lines.insert(id, String::new());
+                    if !line.trim().is_empty() {
+                        self.notify_plugins_of_command(&line);
+                    }
                 }
             }
             _ => self.forward_raw(id, key, mods),
@@ -209,6 +319,9 @@ impl App {
             }
         }
         self.pending_lines.insert(id, String::new());
+        if !line.trim().is_empty() {
+            self.notify_plugins_of_command(line);
+        }
     }
 
     pub fn grid_for(&self, pane_id: u64) -> Option<&GridTerminal> {
@@ -218,6 +331,37 @@ impl App {
 
 fn summarize(report: &Report) -> Vec<String> {
     report.findings.iter().take(3).map(|f| format!("[{}] {}", f.risk, f.explanation)).collect()
+}
+
+/// Load and verify one `<name>.so` against its sibling
+/// `<name>.manifest.json`. Pulled out of `App::load_plugins_from_dir` so
+/// each candidate's failure is independently caught (one malformed
+/// manifest can't abort the whole directory scan).
+///
+/// # Safety
+/// Executes native code from `path` once verification passes — same
+/// caveat as `ut_plugin_loader::load_verified`.
+unsafe fn load_one_plugin(path: &Path, keyring: &Keyring) -> Result<LoadedPlugin, String> {
+    let manifest_path = path.with_extension("manifest.json");
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|e| format!("missing/unreadable manifest {}: {e}", manifest_path.display()))?;
+    let signed: SignedManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| format!("malformed manifest: {e}"))?;
+    ut_plugin_loader::load_verified(path, &signed, keyring).map_err(|e| e.to_string())
+}
+
+/// Turn a plugin's returned `PluginAction` into a human-readable log line.
+/// `RunCommand`/`SuggestCommand` are deliberately never acted on here —
+/// dynamic plugins have no write-access permission grant in this version,
+/// so the strongest thing they can do is ask to be noticed, the same
+/// "never execute silently" rule `ut-plugin-api::PluginContext` enforces
+/// for in-process plugins.
+fn record_plugin_action(messages: &mut Vec<String>, action: &PluginAction) {
+    match action {
+        PluginAction::None => {}
+        PluginAction::ShowMessage(s) => messages.push(s.clone()),
+        PluginAction::SuggestCommand(s) => messages.push(format!("plugin suggests (not run): {s}")),
+        PluginAction::RunCommand(s) => messages.push(format!("plugin asked to run (not run — no permission grant): {s}")),
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +485,96 @@ mod tests {
         assert_eq!(app.layout.zoomed, Some(id));
         app.zoom_active();
         assert_eq!(app.layout.zoomed, None);
+    }
+
+    /// End-to-end proof that a real dynamically-loaded plugin actually
+    /// sees commands and output through `App`, not just that
+    /// `ut-plugin-loader` can load a `.so` in isolation (already covered
+    /// by that crate's own tests). Builds the same fixture cdylib used
+    /// there, signs it, trusts the signer, drops a `.so` +
+    /// `.manifest.json` pair into a scratch directory, and drives `App`
+    /// through its real `handle_key`/`pump_all` paths.
+    #[test]
+    fn loaded_plugin_is_notified_of_real_commands_and_output() {
+        use std::time::Duration;
+        use ut_plugin_signing::{hash_artifact, Manifest, PluginKeypair};
+
+        let built_so = build_fixture_cdylib();
+
+        let scratch = std::env::temp_dir().join(format!("ut-tui-plugin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let so_path = scratch.join("echofix.so");
+        std::fs::copy(&built_so, &so_path).unwrap();
+
+        let bytes = std::fs::read(&so_path).unwrap();
+        let keypair = PluginKeypair::generate();
+        let manifest = Manifest {
+            id: "echo-fixture".into(),
+            name: "Echo Fixture".into(),
+            version: "1.0.0".into(),
+            author: "test".into(),
+            requested_capabilities: vec![],
+            artifact_sha256: hash_artifact(&bytes),
+        };
+        let signed = keypair.sign(manifest);
+        std::fs::write(so_path.with_extension("manifest.json"), serde_json::to_vec(&signed).unwrap()).unwrap();
+
+        let mut app = App::new(80, 24).unwrap();
+        app.trust_plugin_publisher(&keypair.public_key_hex(), "official");
+        let loaded = unsafe { app.load_plugins_from_dir(&scratch) };
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        assert_eq!(loaded, 1);
+        assert!(app.plugin_messages.iter().any(|m| m == "loaded plugin: echo-fixture"));
+
+        for c in "deploy".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert!(
+            app.plugin_messages.iter().any(|m| m == "plugin suggests (not run): echo: deploy"),
+            "expected a plugin suggestion from on_command, got: {:?}",
+            app.plugin_messages
+        );
+
+        // Give the real shell a moment to actually produce output, then
+        // pump it through — this is a live /bin/sh, not a mock.
+        std::thread::sleep(Duration::from_millis(200));
+        app.pump_all();
+        assert!(
+            app.plugin_messages.iter().any(|m| m.starts_with("saw output: ")),
+            "expected on_output to have fired at least once, got: {:?}",
+            app.plugin_messages
+        );
+    }
+
+    /// Builds `ut-plugin-loader-fixture` as a cdylib via a real `cargo
+    /// build` subprocess, mirroring `ut-plugin-loader`'s own test helper —
+    /// duplicated rather than shared because it's a handful of lines and
+    /// pulling in a test-only cross-crate helper dependency isn't worth it.
+    fn build_fixture_cdylib() -> std::path::PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).expect("workspace root");
+
+        let output = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "ut-plugin-loader-fixture", "--lib"])
+            .current_dir(workspace_root)
+            .output()
+            .expect("run cargo build for fixture crate");
+        assert!(
+            output.status.success(),
+            "fixture cdylib build failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let target_dir = workspace_root.join("target/debug");
+        for name in ["libut_plugin_loader_fixture.so", "libut_plugin_loader_fixture.dylib", "ut_plugin_loader_fixture.dll"] {
+            let candidate = target_dir.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        panic!("built fixture crate but couldn't find its cdylib under {}", target_dir.display());
     }
 }

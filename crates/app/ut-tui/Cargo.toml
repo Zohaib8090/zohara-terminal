@@ -19,5 +19,9 @@ ut-grid = { path = "../../core/ut-grid" }
 ut-ui = { path = "../ut-ui" }
 ut-input = { path = "../ut-input" }
 ut-safety = { path = "../../core/ut-safety" }
+ut-plugin-api = { path = "../../plugins/ut-plugin-api" }
+ut-plugin-loader = { path = "../../plugins/ut-plugin-loader" }
+ut-plugin-signing = { path = "../../plugins/ut-plugin-signing" }
+serde_json = "1"
 ratatui = "0.29"
 crossterm = "0.28"

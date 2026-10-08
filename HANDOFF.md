@@ -9,8 +9,8 @@ then `GOTCHAS.md` before writing any code.
 
 - **Branch**: `claude/upbeat-sagan-bfhhua` (this is the active development
   branch — push here unless told otherwise).
-- **Latest commit**: dynamic plugin loading (`ut-plugin-loader` +
-  `ut-plugin-loader-fixture`) — see changelog below.
+- **Latest commit**: wiring `ut-plugin-loader` into `ut-tui::App` (real
+  commands/output reaching a loaded plugin) — see changelog below.
 - **Tree is clean**: no uncommitted changes as of this handoff.
 - **27 crates, 314+ tests, all passing, `cargo clippy --workspace
   --all-targets` clean.** This has been true after every commit in this
@@ -68,31 +68,44 @@ user has consistently delegated that choice.
 
 ## What just happened, in build order (newest first)
 
-1. **`ut-plugin-loader` + `ut-plugin-loader-fixture`** — dynamic plugin
-   loading: `load_verified` won't `dlopen` a `.so` until its bytes pass
-   `ut-plugin-signing::Keyring::verify`. Deliberately *not* a `dyn Plugin`
-   trait object across the dylib boundary (vtable layout isn't a stable
-   ABI across toolchains) — instead five `extern "C"` functions over an
-   opaque instance pointer and a tagged-string wire protocol for
-   `PluginAction`. Verified by actually `cargo build`-ing the fixture
-   crate as a cdylib and `dlopen`-ing the real `.so` in a test, not a
-   mock. This was roadmap item #1 ("the highest-risk remaining item").
-2. **`ut-palette`** — fuzzy command palette (fzf-style scoring), wired
+1. **Wired `ut-plugin-loader` into `ut-tui::App`.** `App::
+   load_plugins_from_dir` scans a directory for `<name>.so` +
+   `<name>.manifest.json` pairs, verifies each via `ut-plugin-signing`,
+   loads the ones that pass, and actually drives them from then on:
+   `notify_plugins_of_command` calls `on_command` right after this app's
+   own safety gate forwards a line, and `pump_all` calls `on_output` on
+   every raw chunk read from a pane. A plugin still can't execute
+   anything — `RunCommand`/`SuggestCommand` are logged to
+   `plugin_messages`, never acted on, since dynamic plugins have no
+   write-access grant in this version. Verified with a real test: build
+   the fixture plugin as a cdylib, sign it, trust the signer, load it
+   through `App`, then type a real command and read real shell output
+   through `App::handle_key`/`pump_all` and assert the plugin actually
+   saw both.
+2. **`ut-plugin-loader` + `ut-plugin-loader-fixture`** (previous round) —
+   dynamic plugin loading itself: `load_verified` won't `dlopen` a `.so`
+   until its bytes pass `ut-plugin-signing::Keyring::verify`. Deliberately
+   *not* a `dyn Plugin` trait object across the dylib boundary (vtable
+   layout isn't a stable ABI across toolchains) — instead five
+   `extern "C"` functions over an opaque instance pointer and a
+   tagged-string wire protocol for `PluginAction`. This was roadmap item
+   #1 ("the highest-risk remaining item").
+4. **`ut-palette`** — fuzzy command palette (fzf-style scoring), wired
    into `ut-gui` as Ctrl+P. Verified with screenshots showing the overlay
    filtering/ranking results and a `--palette-confirm` flag proving a
    selected action actually dispatches (pane count 1→2).
-3. **Workflow export** — `ut-plugin-workflow::export` renders a workflow
+5. **Workflow export** — `ut-plugin-workflow::export` renders a workflow
    as a Bash/Zsh/Fish/PowerShell script; `text_format` round-trips
    JSON/YAML. Bash/Zsh/Fish generators are verified by actually running
    the generated script through the real interpreter (installed `zsh`
    and `fish` in this sandbox specifically for this).
-4. **SFTP + port forwarding** — `ut-plugin-ssh::sftp`/`forward`. Verified
+6. **SFTP + port forwarding** — `ut-plugin-ssh::sftp`/`forward`. Verified
    against a real local `sshd` (upload/download/mkdir/rename/rmdir, and
    both `local_forward`/`remote_forward` tunneling real TCP traffic).
-5. **`ut-gui`** — the native windowed GUI (eframe/egui), reusing
+7. **`ut-gui`** — the native windowed GUI (eframe/egui), reusing
    `ut-tui::App` unmodified. Verified with real screenshots under Xvfb
    (Mesa/llvmpipe software rendering, no GPU needed).
-6. **Five parallel builds in one round**: `ut-plugin-signing` (ed25519
+8. **Five parallel builds in one round**: `ut-plugin-signing` (ed25519
    manifest signing), `ut-daemon` (the real multiplexer — named sessions
    surviving detach/reattach over a Unix socket), `ut-tui` (the first real
    interactive front end), `ut-plugin-ai`'s `NetworkAssistant`
