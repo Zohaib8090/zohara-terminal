@@ -156,6 +156,29 @@ the workspace purely as a test dependency; if you add a second
 dynamically-loaded plugin for tests, follow the same pattern rather than
 hand-rolling raw bytes to fake a plugin binary.
 
+## egui: don't derive on-screen cell position from font metrics queried separately from the actual layout
+
+`ut-gui` went without any rendered text cursor for a while — `ut-tui`
+never needed one because it runs inside a *real* terminal, which draws
+its own native hardware cursor wherever ratatui tells it to; `ut-gui` is
+a custom-drawn window with no such thing, so nothing ever painted one.
+Adding it looked simple: query `ctx.fonts(|f| f.row_height(&font_id))`
+once for cell height, then paint a rect at `cursor_row as f32 *
+row_height`. It compiled, and the first screenshot showed a cursor — in
+the *wrong* row, roughly one row high by the third visible line. Cause:
+egui's actual line spacing for a multi-row `LayoutJob` (built here via
+explicit `"\n"` separators, see `render.rs`) isn't guaranteed to equal
+`FontId::row_height()` exactly, so a small per-row discrepancy compounds
+the further down the screen you measure. Fixed by deriving cell size from
+the *actual rendered* label rect instead: `response.rect.height() /
+grid.rows as f32` — self-consistent with whatever egui really drew, no
+matter what its internal line-height happens to be. If you add anything
+else that needs to point at a specific cell in a rendered
+`LayoutJob` (selection highlighting, a hover target, etc.), measure from
+the response rect, not from a separately-queried font metric, and prove
+it with a screenshot a few rows down, not just row 0 (row 0 looks right
+either way — the drift only shows up once it's compounded).
+
 ## GUI verification needs a real render, not just "it compiled"
 
 `eframe`'s `ViewportCommand::Screenshot` + a software-rendered `Xvfb`

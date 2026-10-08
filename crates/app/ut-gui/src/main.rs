@@ -26,6 +26,7 @@
 use egui::{Color32, FontId, Key as EKey};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use ut_grid::CursorShape;
 use ut_input::{Key as UtKey, Modifiers as UtMods};
 use ut_palette::{Category, Palette, PaletteItem, PaletteState};
 use ut_tui::{App, PromptState};
@@ -497,6 +498,11 @@ impl GuiApp {
         let bounds = URect { x: 0.0, y: 0.0, w: avail.width(), h: avail.height() };
         let char_size = self.char_size.unwrap_or(egui::vec2(8.0, 16.0));
         let font_size = self.font_size;
+        // Classic ~530ms on/off terminal cursor blink, driven off egui's own
+        // clock rather than a timer we'd have to tick ourselves — repaint is
+        // already requested every 16ms (see `update`), so this animates
+        // smoothly for free.
+        let blink_on = ((ui.input(|i| i.time) / 0.53) as i64).rem_euclid(2) == 0;
 
         for (pane_id, rect) in effective.rects(bounds) {
             let screen_rect = egui::Rect::from_min_size(avail.min + egui::vec2(rect.x, rect.y), egui::vec2(rect.w, rect.h));
@@ -522,7 +528,57 @@ impl GuiApp {
                         ui.label(egui::RichText::new(format!("pane {pane_id}")).small().color(Color32::from_gray(150)));
                         if let Some(terminal) = self.app.grid_for(pane_id) {
                             let job = crate::render::grid_to_layout_job(terminal.grid(), font_size);
-                            ui.label(job);
+                            let text_response = ui.label(job);
+
+                            let show_cursor = terminal.cursor_visible && (!terminal.cursor_blink || blink_on);
+                            if show_cursor {
+                                let grid = terminal.grid();
+                                // Derived from the label's *actual* rendered
+                                // size rather than the font-metrics-based
+                                // `char_size` used for layout decisions
+                                // elsewhere: egui's line spacing for a
+                                // multi-row LayoutJob isn't guaranteed to
+                                // equal `font.row_height()` exactly, and a
+                                // small per-row drift compounds into a
+                                // visibly wrong cursor row by the time you're
+                                // a few lines down (caught by screenshot
+                                // verification, not by eye).
+                                let cell = egui::vec2(
+                                    text_response.rect.width() / grid.cols.max(1) as f32,
+                                    text_response.rect.height() / grid.rows.max(1) as f32,
+                                );
+                                let origin = text_response.rect.min;
+                                let pos = egui::pos2(
+                                    origin.x + terminal.cursor_col as f32 * cell.x,
+                                    origin.y + terminal.cursor_row as f32 * cell.y,
+                                );
+                                let color =
+                                    if focused { Color32::from_gray(230) } else { Color32::from_gray(110) };
+                                let painter = ui.painter();
+                                match terminal.cursor_shape {
+                                    CursorShape::Block => {
+                                        let rect = egui::Rect::from_min_size(pos, cell);
+                                        if focused {
+                                            painter.rect_filled(rect, 0.0, color.gamma_multiply(0.45));
+                                        } else {
+                                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, color));
+                                        }
+                                    }
+                                    CursorShape::Underline => {
+                                        let y = pos.y + cell.y - 2.0;
+                                        painter.line_segment(
+                                            [egui::pos2(pos.x, y), egui::pos2(pos.x + cell.x, y)],
+                                            egui::Stroke::new(2.0, color),
+                                        );
+                                    }
+                                    CursorShape::Bar => {
+                                        painter.line_segment(
+                                            [pos, egui::pos2(pos.x, pos.y + cell.y)],
+                                            egui::Stroke::new(2.0, color),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     });
             });
