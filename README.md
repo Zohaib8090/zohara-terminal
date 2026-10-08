@@ -9,7 +9,7 @@ The full product vision is in [`docs/SPEC.md`](docs/SPEC.md).
 The workspace is layered, and dependencies only ever flow one direction:
 **core → services → plugins → app**. Nothing in `core` knows about a
 service; nothing in a service knows about a plugin. This is what keeps a
-24-crate workspace navigable instead of a dependency tangle.
+25-crate workspace navigable instead of a dependency tangle.
 
 ```
 crates/
@@ -42,7 +42,8 @@ crates/
     ├── ut-ui              # pane split-tree layout (splits, resize, zoom) — pure data
     ├── ut-tui               # a real interactive multiplexer UI (ratatui) over ut-session + ut-ui
     ├── ut-gui                 # a real native OS window (eframe/egui) over ut-tui's own App
-    ├── ut-cli                   # `zohara check`/`zohara paste` — safety-engine CLI
+    ├── ut-palette                # fuzzy command palette (search/recent/favorites/aliases) — pure data
+    ├── ut-cli                      # `zohara check`/`zohara paste` — safety-engine CLI
     └── ut-app                      # `run` — spawns a real command through the whole core stack
 ```
 
@@ -95,6 +96,12 @@ crates/
   (`Grid` → `egui::text::LayoutJob`, in `ut-gui::render`) and a new input
   translator (`egui::Event` → `ut_input::Key`, in `main.rs`). Getting a
   second, real, native-windowed front end cost two files, not a rewrite.
+  `ut-palette` is wired in the same way: `ut-gui` owns one `Palette`
+  populated with real actions (split/close/zoom/quit) and a `PaletteState`
+  driven by Ctrl+P, but the fuzzy matching, ranking, and recent/favorite/
+  alias logic all live in `ut-palette` untouched by any rendering code —
+  confirming a result calls the exact same `app.split_active`/
+  `close_active`/`zoom_active` the Ctrl+B prefix already calls.
 
 ### See it work end-to-end
 
@@ -127,13 +134,19 @@ yourself with `ut-gui`'s verification flags:
 ```
 xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/out.png \
     --exit-after-frames 60 --auto-type 'echo hello'
+
+# The command palette (Ctrl+P), verified the same way: a query that filters
+# and ranks results, and --palette-confirm proving the selected action is
+# actually dispatched (here: split: 1 pane -> 2).
+xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/palette.png \
+    --exit-after-frames 20 --open-palette 'split h' --palette-confirm
 ```
 
 ## Building
 
 ```
 cargo build --workspace
-cargo test --workspace     # 278 tests across 24 crates, all offline/hermetic
+cargo test --workspace     # 308 tests across 25 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
@@ -191,7 +204,12 @@ cargo test -p ut-plugin-ssh -- --ignored
 `ut-gui` gives the project a real native window, but it's still one plain
 window — no multi-window/tray/dropdown/PiP modes, no themes-as-settings
 (colors are hardcoded), no mouse-driven resize/drag for panes (only the
-Ctrl+B keyboard prefix), no font/appearance picker. SSH now has a real
+Ctrl+B keyboard prefix), no font/appearance picker. The command palette
+(`ut-palette`) covers actions, but not yet "search tabs/SSH hosts/saved
+workflows/files/settings/documentation/history" — those need the app
+layer to actually feed items from those sources into the registry it
+already accepts, and natural-language action search needs an AI backend
+wired to it, neither built yet. SSH now has a real
 `SshClient`, SFTP browser, and local/remote port forwarding — still
 missing: dynamic (SOCKS) forwarding and ProxyJump chaining (see
 `ut-plugin-ssh::forward`'s module docs for why dynamic forwarding

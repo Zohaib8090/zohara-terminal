@@ -2,6 +2,11 @@
 //! safety logic is `ut_tui::App` (shared with the TUI front end — see
 //! `lib.rs`). Only rendering and input translation are new here.
 //!
+//! Also wires in `ut-palette` as a real Ctrl+P command palette over the
+//! same split/close/zoom/quit actions the Ctrl+B prefix already exposes —
+//! two input paths to the same `ut_tui::App` calls, not two
+//! implementations of "what a split does".
+//!
 //! Verification flags (used in development, safe to leave in for anyone
 //! else who wants to re-verify without a physical display):
 //!   --screenshot <path>          save a PNG once the window has settled
@@ -9,6 +14,10 @@
 //!   --auto-type "<text>"         type this into the active pane (then Enter)
 //!                                 a few frames in, to prove keyboard input
 //!                                 and PTY output both actually work
+//!   --open-palette "<query>"     open the command palette and type this
+//!                                 query a few frames in, for screenshotting
+//!                                 the palette itself without simulating a
+//!                                 real Ctrl+P keypress through Xvfb
 //!
 //! Example, entirely headless:
 //!   xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/out.png \
@@ -18,6 +27,7 @@ use egui::{Color32, FontId, Key as EKey};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use ut_input::{Key as UtKey, Modifiers as UtMods};
+use ut_palette::{Category, Palette, PaletteItem, PaletteState};
 use ut_tui::{App, PromptState};
 use ut_ui::{Direction as SplitDirection, Rect as URect};
 
@@ -26,6 +36,8 @@ struct Args {
     exit_after_frames: Option<u32>,
     auto_type: Option<String>,
     auto_split: Option<SplitDirection>,
+    open_palette: Option<String>,
+    palette_confirm: bool,
 }
 
 fn parse_args() -> Args {
@@ -33,6 +45,8 @@ fn parse_args() -> Args {
     let mut exit_after_frames = None;
     let mut auto_type = None;
     let mut auto_split = None;
+    let mut open_palette = None;
+    let mut palette_confirm = false;
     let raw: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < raw.len() {
@@ -57,10 +71,32 @@ fn parse_args() -> Args {
                 };
                 i += 2;
             }
+            "--open-palette" => {
+                open_palette = raw.get(i + 1).cloned();
+                i += 2;
+            }
+            "--palette-confirm" => {
+                palette_confirm = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    Args { screenshot, exit_after_frames, auto_type, auto_split }
+    Args { screenshot, exit_after_frames, auto_type, auto_split, open_palette, palette_confirm }
+}
+
+fn build_palette() -> Palette {
+    let mut palette = Palette::new();
+    palette.set_items(vec![
+        PaletteItem::new("split-h", "Split Pane Horizontally", Category::Action).with_keyword("vsplit"),
+        PaletteItem::new("split-v", "Split Pane Vertically", Category::Action).with_keyword("hsplit"),
+        PaletteItem::new("close-pane", "Close Active Pane", Category::Action),
+        PaletteItem::new("toggle-zoom", "Toggle Zoom on Active Pane", Category::Action),
+        PaletteItem::new("quit", "Quit Zohara Terminal", Category::Action),
+    ]);
+    palette.add_alias("h", "split-h");
+    palette.add_alias("v", "split-v");
+    palette
 }
 
 fn main() -> eframe::Result<()> {
@@ -96,6 +132,13 @@ struct GuiApp {
     auto_split_done: bool,
     frame_count: u32,
     screenshot_saved: bool,
+    palette: Palette,
+    palette_state: PaletteState,
+    palette_open: bool,
+    open_palette_arg: Option<String>,
+    open_palette_done: bool,
+    palette_confirm: bool,
+    palette_confirm_done: bool,
 }
 
 impl GuiApp {
@@ -117,6 +160,47 @@ impl GuiApp {
             auto_split_done: false,
             frame_count: 0,
             screenshot_saved: false,
+            palette: build_palette(),
+            palette_state: PaletteState::new(),
+            palette_open: false,
+            open_palette_arg: args.open_palette,
+            open_palette_done: false,
+            palette_confirm: args.palette_confirm,
+            palette_confirm_done: false,
+        }
+    }
+
+    fn maybe_auto_open_palette(&mut self) {
+        if let Some(query) = self.open_palette_arg.clone() {
+            if self.frame_count == 3 && !self.open_palette_done {
+                self.palette_open = true;
+                self.palette_state.set_query(query);
+                self.open_palette_done = true;
+            } else if self.frame_count == 8 && self.palette_confirm && !self.palette_confirm_done {
+                // Same confirm()/run_palette_action() path a real Enter
+                // keypress takes in handle_palette_key — verifies the
+                // palette can actually *do* something, not just filter.
+                if let Some(id) = self.palette_state.confirm(&mut self.palette) {
+                    self.run_palette_action(&id);
+                }
+                self.palette_open = false;
+                self.palette_confirm_done = true;
+            }
+        }
+    }
+
+    fn run_palette_action(&mut self, id: &str) {
+        match id {
+            "split-h" => {
+                let _ = self.app.split_active(SplitDirection::Horizontal, 50, 15);
+            }
+            "split-v" => {
+                let _ = self.app.split_active(SplitDirection::Vertical, 50, 15);
+            }
+            "close-pane" => self.app.close_active(),
+            "toggle-zoom" => self.app.zoom_active(),
+            "quit" => self.app.should_quit = true,
+            _ => {}
         }
     }
 
@@ -152,12 +236,30 @@ impl GuiApp {
         for event in &events {
             match event {
                 egui::Event::Text(text) => {
-                    for c in text.chars() {
-                        self.dispatch_key(UtKey::Char(c), UtMods::none());
+                    if self.palette_open {
+                        for c in text.chars() {
+                            self.palette_state.push_char(c);
+                        }
+                    } else {
+                        for c in text.chars() {
+                            self.dispatch_key(UtKey::Char(c), UtMods::none());
+                        }
                     }
                 }
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
                     let mods = UtMods { ctrl: modifiers.ctrl, alt: modifiers.alt, shift: modifiers.shift };
+
+                    if *key == EKey::P && mods.ctrl {
+                        self.palette_open = !self.palette_open;
+                        self.palette_state.clear();
+                        continue;
+                    }
+
+                    if self.palette_open {
+                        self.handle_palette_key(*key);
+                        continue;
+                    }
+
                     if let Some(k) = translate_key(*key) {
                         // Plain character keys arrive via Event::Text too;
                         // only forward Key-form chars when a modifier makes
@@ -180,6 +282,25 @@ impl GuiApp {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn handle_palette_key(&mut self, key: EKey) {
+        match key {
+            EKey::Escape => self.palette_open = false,
+            EKey::Backspace => self.palette_state.backspace(),
+            EKey::ArrowDown => {
+                let count = self.palette_state.visible_items(&self.palette).len();
+                self.palette_state.move_down(count);
+            }
+            EKey::ArrowUp => self.palette_state.move_up(),
+            EKey::Enter => {
+                if let Some(id) = self.palette_state.confirm(&mut self.palette) {
+                    self.run_palette_action(&id);
+                }
+                self.palette_open = false;
+            }
+            _ => {}
         }
     }
 
@@ -266,6 +387,7 @@ impl eframe::App for GuiApp {
         self.handle_input(ctx);
         self.maybe_auto_split();
         self.maybe_auto_type();
+        self.maybe_auto_open_palette();
 
         if self.char_size.is_none() {
             let font_id = FontId::monospace(self.font_size);
@@ -293,6 +415,8 @@ impl eframe::App for GuiApp {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_gray(18))).show(ctx, |ui| {
             self.draw_panes(ui);
         });
+
+        self.draw_palette(ctx);
 
         self.frame_count += 1;
 
@@ -323,6 +447,47 @@ impl GuiApp {
                 ui.label(line);
             }
         });
+    }
+
+    fn draw_palette(&mut self, ctx: &egui::Context) {
+        if !self.palette_open {
+            return;
+        }
+        let items = self.palette_state.visible_items(&self.palette);
+        let selected = self.palette_state.selected_index().min(items.len().saturating_sub(1));
+
+        egui::Window::new("palette")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .fixed_size(egui::vec2(440.0, 260.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Command Palette");
+                    ui.weak("(Ctrl+P to close, type to search, Enter to run)");
+                });
+                ui.separator();
+                ui.label(egui::RichText::new(format!("> {}", self.palette_state.query())).monospace().size(16.0));
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    if items.is_empty() {
+                        ui.weak("No matching commands");
+                    }
+                    for (i, item) in items.iter().enumerate() {
+                        let label = match &item.subtitle {
+                            Some(sub) => format!("{}  —  {}", item.label, sub),
+                            None => item.label.clone(),
+                        };
+                        let text = if i == selected {
+                            egui::RichText::new(format!("▶ {label}")).color(Color32::from_rgb(100, 200, 220)).strong()
+                        } else {
+                            egui::RichText::new(format!("  {label}")).color(Color32::from_gray(200))
+                        };
+                        ui.label(text);
+                    }
+                });
+            });
     }
 
     fn draw_panes(&mut self, ui: &mut egui::Ui) {

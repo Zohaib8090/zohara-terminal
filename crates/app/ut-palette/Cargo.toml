@@ -1,0 +1,8 @@
+[package]
+name = "ut-palette"
+description = "Command palette / launcher (Section 20): fuzzy matching, recent/favorite actions, aliases, keyboard navigation — toolkit-agnostic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -2958,6 +2958,7 @@ dependencies = [
  "image",
  "ut-grid",
  "ut-input",
+ "ut-palette",
  "ut-tui",
  "ut-ui",
 ]
@@ -2972,6 +2973,10 @@ version = "0.1.0"
 
 [[package]]
 name = "ut-notify"
+version = "0.1.0"
+
+[[package]]
+name = "ut-palette"
 version = "0.1.0"
 
 [[package]]

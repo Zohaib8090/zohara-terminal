@@ -24,6 +24,7 @@ members = [
     "crates/app/ut-cli",
     "crates/app/ut-tui",
     "crates/app/ut-gui",
+    "crates/app/ut-palette",
     "crates/app/ut-app",
 ]
 
