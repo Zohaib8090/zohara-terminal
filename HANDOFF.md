@@ -9,10 +9,10 @@ then `GOTCHAS.md` before writing any code.
 
 - **Branch**: `claude/upbeat-sagan-bfhhua` (this is the active development
   branch — push here unless told otherwise).
-- **Latest commit**: wiring `ut-plugin-loader` into `ut-tui::App` (real
-  commands/output reaching a loaded plugin) — see changelog below.
+- **Latest commit**: SSH dynamic (SOCKS5) port forwarding
+  (`ut-plugin-ssh::forward::dynamic_forward`) — see changelog below.
 - **Tree is clean**: no uncommitted changes as of this handoff.
-- **27 crates, 314+ tests, all passing, `cargo clippy --workspace
+- **27 crates, 319+ tests, all passing, `cargo clippy --workspace
   --all-targets` clean.** This has been true after every commit in this
   branch's history — keep it true.
 - **No PR has been opened.** All work has been pushed directly to the
@@ -68,7 +68,23 @@ user has consistently delegated that choice.
 
 ## What just happened, in build order (newest first)
 
-1. **Wired `ut-plugin-loader` into `ut-tui::App`.** `App::
+1. **SSH dynamic (SOCKS5) forwarding.** `ut-plugin-ssh::forward::
+   dynamic_forward` (`ssh -D`) is a local SOCKS5 proxy: each accepted
+   connection speaks a minimal SOCKS5 handshake (CONNECT only, no-auth
+   only) to say its own destination, then gets tunnelled there via
+   `channel_direct_tcpip`, same machinery as `local_forward`. The
+   handshake itself runs in blocking mode (bounded by a short timeout)
+   rather than through the non-blocking poll loop the rest of forwarding
+   uses — documented tradeoff in that module's doc comment (briefly
+   stalls other active tunnels during one new connection's handshake;
+   fine for a local dev-tool proxy, revisit if ever exposed to untrusted
+   connectors). Verified two ways: the SOCKS5 handshake parser has
+   direct, no-`sshd`-needed tests (IPv4/domain-name parsing, wrong
+   version, unsupported command) that run in the default suite, and the
+   full tunnel is verified end-to-end against a real local `sshd` with a
+   hand-rolled SOCKS5 client, mirroring the existing `local_forward`/
+   `remote_forward` live tests.
+2. **Wired `ut-plugin-loader` into `ut-tui::App`.** `App::
    load_plugins_from_dir` scans a directory for `<name>.so` +
    `<name>.manifest.json` pairs, verifies each via `ut-plugin-signing`,
    loads the ones that pass, and actually drives them from then on:
@@ -82,7 +98,7 @@ user has consistently delegated that choice.
    through `App`, then type a real command and read real shell output
    through `App::handle_key`/`pump_all` and assert the plugin actually
    saw both.
-2. **`ut-plugin-loader` + `ut-plugin-loader-fixture`** (previous round) —
+3. **`ut-plugin-loader` + `ut-plugin-loader-fixture`** (earlier round) —
    dynamic plugin loading itself: `load_verified` won't `dlopen` a `.so`
    until its bytes pass `ut-plugin-signing::Keyring::verify`. Deliberately
    *not* a `dyn Plugin` trait object across the dylib boundary (vtable

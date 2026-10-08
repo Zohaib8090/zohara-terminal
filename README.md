@@ -79,9 +79,16 @@ crates/
   libssh2 requires every channel on one `Session` to be accessed from a
   single thread (concurrent access from different threads is undefined
   behavior) — so `ut-plugin-ssh::forward` gives each active `local_forward`/
-  `remote_forward` a dedicated, non-blocking session and cooperatively
-  multiplexes every tunnelled connection on that one thread, rather than
-  reaching for a `Mutex<Session>` and fighting libssh2's threading model.
+  `remote_forward`/`dynamic_forward` a dedicated, non-blocking session and
+  cooperatively multiplexes every tunnelled connection on that one thread,
+  rather than reaching for a `Mutex<Session>` and fighting libssh2's
+  threading model. `dynamic_forward` (`ssh -D`, a local SOCKS5 proxy) adds
+  one deliberate exception: the SOCKS5 handshake for a newly-accepted
+  connection runs in blocking mode (bounded by a short read timeout)
+  rather than through that same non-blocking poll loop — simpler than a
+  half-open-handshake state machine, at the cost of briefly stalling
+  already-active tunnels while one new connection's handshake completes.
+  See that module's doc comment for the full tradeoff.
 - **A workflow exporter is only trustworthy if the output actually runs.**
   `ut-plugin-workflow::export`'s Bash/Zsh/Fish generators aren't just
   string templates checked by eye — their tests write the generated
@@ -148,7 +155,7 @@ xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/palette.png \
 
 ```
 cargo build --workspace
-cargo test --workspace     # 314+ tests across 27 crates, all offline/hermetic
+cargo test --workspace     # 319+ tests across 27 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
@@ -165,11 +172,14 @@ cleanly (not a failure) if that particular shell isn't installed, so
 `cargo test --workspace` still passes on a machine with only `bash`.
 
 `ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`, the
-SFTP round trip, and both `local_forward`/`remote_forward`, against a real
-server) are `#[ignore]`d by default so `cargo test --workspace` never
-depends on network access or a running `sshd` — they were verified in
-development against a real local test `sshd` (with `AllowTcpForwarding
-yes` for the forwarding tests). Run them yourself against your own test
+SFTP round trip, and `local_forward`/`remote_forward`/`dynamic_forward`,
+against a real server) are `#[ignore]`d by default so `cargo test
+--workspace` never depends on network access or a running `sshd` — they
+were verified in development against a real local test `sshd` (with
+`AllowTcpForwarding yes` for the forwarding tests). The SOCKS5 handshake
+parser `dynamic_forward` is built on has its own tests that run by
+default, with no `sshd` involved — see `forward.rs`'s
+`socks5_handshake_*` tests. Run the live ones yourself against your own test
 server with:
 
 ```
@@ -225,10 +235,14 @@ workflows/files/settings/documentation/history" — those need the app
 layer to actually feed items from those sources into the registry it
 already accepts, and natural-language action search needs an AI backend
 wired to it, neither built yet. SSH now has a real
-`SshClient`, SFTP browser, and local/remote port forwarding — still
-missing: dynamic (SOCKS) forwarding and ProxyJump chaining (see
-`ut-plugin-ssh::forward`'s module docs for why dynamic forwarding
-specifically was scoped out). Dynamic plugin loading is now wired all the
+`SshClient`, SFTP browser, and local/remote/dynamic (SOCKS5) port
+forwarding — `ssh -D` works end-to-end against a real `sshd`, tested both
+with a hand-rolled SOCKS5 client in the live forwarding test and with
+direct unit tests of the handshake parser itself. Still missing:
+ProxyJump chaining (connecting through an intermediate host rather than
+directly) — `ut-plugin-ssh` already parses `ProxyJump` out of an SSH
+config file and flags when a host profile uses one, but nothing actually
+dials through the jump host yet. Dynamic plugin loading is now wired all the
 way into `ut-tui::App`: `App::load_plugins_from_dir` scans a directory for
 signed `.so`/`.manifest.json` pairs, verifies and loads each via
 `ut-plugin-loader`, then actually drives them — every command gets an

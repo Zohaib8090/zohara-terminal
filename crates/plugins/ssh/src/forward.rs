@@ -13,19 +13,34 @@
 //! around it with locks. [`local_forward`]/[`remote_forward`] each keep
 //! *sole* ownership of their session; nothing else ever touches it.
 //!
-//! Dynamic (SOCKS) forwarding is not implemented — it needs a SOCKS4/5
-//! protocol implementation in front of the same per-connection channel
-//! logic used here, which is future work layered on top of this module,
-//! not a different architecture.
+//! [`dynamic_forward`] (`ssh -D`) is the same per-connection
+//! `channel_direct_tcpip` logic as [`local_forward`], except the
+//! destination host/port isn't fixed at forward-creation time — each
+//! accepted connection speaks a minimal SOCKS5 handshake first (CONNECT
+//! only, no-auth only; good enough for "point a browser's SOCKS proxy
+//! setting at this port", not a general SOCKS server) to say where *it*
+//! wants to go. That handshake is done with the new connection briefly
+//! back in blocking mode (bounded by a short read timeout) rather than
+//! folded into the non-blocking poll loop like everything else here — a
+//! deliberate simplification: it's a handful of small reads/writes a real
+//! SOCKS client sends immediately after connecting, and doing it inline
+//! means the event loop doesn't need a half-open-handshake state machine.
+//! The cost is real: a slow or malicious client mid-handshake stalls the
+//! *whole* loop (including already-active tunnels) for up to that
+//! timeout. Acceptable for a local dev-tool SOCKS proxy; revisit with a
+//! proper non-blocking handshake state machine if this is ever exposed to
+//! untrusted connectors.
 //!
-//! Like [`crate::client`]'s tests, these need a reachable `sshd` with
-//! `AllowTcpForwarding yes`, so their tests are `#[ignore]`d by default;
-//! see that module's docs for how to run them.
+//! Like [`crate::client`]'s tests, the forwarding tests that need a real
+//! SSH connection are `#[ignore]`d by default; see that module's docs for
+//! how to run them. The SOCKS5 handshake parser itself has no such
+//! dependency and is tested directly against a real local `TcpStream`
+//! pair in the default test run.
 
 use crate::client::{KnownHosts, SshClient, SshConfig, SshError};
 use ssh2::{Channel, Session};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -227,6 +242,162 @@ pub fn remote_forward(config: SshConfig, known_hosts: Option<KnownHosts>, remote
     Ok(PortForward { stop, handle: Some(handle), bound_port })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Socks5Error {
+    Io,
+    UnsupportedVersion,
+    NoAcceptableAuthMethod,
+    UnsupportedCommand,
+    UnsupportedAddressType,
+    InvalidDomainName,
+}
+
+impl From<std::io::Error> for Socks5Error {
+    fn from(_: std::io::Error) -> Self {
+        Socks5Error::Io
+    }
+}
+
+/// Perform a minimal SOCKS5 handshake (RFC 1928) on `stream`, which must
+/// already be in blocking mode with a reasonable read timeout set. Only
+/// the no-authentication method and the CONNECT command are accepted —
+/// everything [`dynamic_forward`] needs and nothing more. On success,
+/// writes the "succeeded" reply and returns the requested destination;
+/// on failure, best-effort writes a SOCKS5 error reply (ignoring any
+/// write error, since the connection is being dropped either way) before
+/// returning `Err`.
+fn do_socks5_handshake(stream: &mut TcpStream) -> Result<(String, u16), Socks5Error> {
+    let mut greeting_header = [0u8; 2];
+    stream.read_exact(&mut greeting_header)?;
+    if greeting_header[0] != 0x05 {
+        return Err(Socks5Error::UnsupportedVersion);
+    }
+    let mut methods = vec![0u8; greeting_header[1] as usize];
+    stream.read_exact(&mut methods)?;
+    if !methods.contains(&0x00) {
+        let _ = stream.write_all(&[0x05, 0xFF]); // no acceptable methods
+        return Err(Socks5Error::NoAcceptableAuthMethod);
+    }
+    stream.write_all(&[0x05, 0x00])?; // chosen method: no auth
+
+    let mut request_header = [0u8; 4];
+    stream.read_exact(&mut request_header)?;
+    if request_header[0] != 0x05 {
+        return Err(Socks5Error::UnsupportedVersion);
+    }
+    if request_header[1] != 0x01 {
+        let _ = stream.write_all(&socks5_reply(0x07)); // command not supported
+        return Err(Socks5Error::UnsupportedCommand);
+    }
+
+    let host = match request_header[3] {
+        0x01 => {
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr)?;
+            Ipv4Addr::from(addr).to_string()
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len)?;
+            let mut name = vec![0u8; len[0] as usize];
+            stream.read_exact(&mut name)?;
+            String::from_utf8(name).map_err(|_| Socks5Error::InvalidDomainName)?
+        }
+        0x04 => {
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr)?;
+            Ipv6Addr::from(addr).to_string()
+        }
+        _ => {
+            let _ = stream.write_all(&socks5_reply(0x08)); // address type not supported
+            return Err(Socks5Error::UnsupportedAddressType);
+        }
+    };
+    let mut port_bytes = [0u8; 2];
+    stream.read_exact(&mut port_bytes)?;
+    let port = u16::from_be_bytes(port_bytes);
+
+    stream.write_all(&socks5_reply(0x00))?; // succeeded
+    Ok((host, port))
+}
+
+/// Build a SOCKS5 reply with the given status byte and a dummy
+/// `0.0.0.0:0` bound address — we don't track a real local bind address
+/// per tunnelled connection (there isn't one; it's relayed over SSH), and
+/// real SOCKS clients don't rely on this field being meaningful.
+fn socks5_reply(status: u8) -> [u8; 10] {
+    [0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+}
+
+/// `ssh -D local_port` — a local SOCKS5 proxy: each connection says where
+/// *it* wants to go (via the SOCKS handshake), tunnelled there through
+/// the SSH server with `channel_direct_tcpip`, same as [`local_forward`]
+/// but with a per-connection destination instead of one fixed at
+/// creation. See the module docs for why the handshake itself runs in
+/// blocking mode rather than through the non-blocking poll loop below.
+pub fn dynamic_forward(config: SshConfig, known_hosts: Option<KnownHosts>, local_port: u16) -> Result<PortForward, SshError> {
+    let listener = TcpListener::bind(("127.0.0.1", local_port))?;
+    listener.set_nonblocking(true)?;
+    let bound_port = listener.local_addr()?.port();
+
+    let client = SshClient::connect(&config, known_hosts.as_ref())?;
+    let session: Session = client.session;
+    session.set_blocking(false);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+
+    let handle = thread::spawn(move || {
+        let mut pending: Vec<(TcpStream, String, u16)> = Vec::new();
+        let mut active: Vec<(TcpStream, Channel)> = Vec::new();
+        let mut buf = [0u8; 8192];
+
+        while !stop_clone.load(Ordering::SeqCst) {
+            let mut activity = false;
+
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    activity = true;
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    match do_socks5_handshake(&mut stream) {
+                        Ok((host, port)) => {
+                            let _ = stream.set_nonblocking(true);
+                            pending.push((stream, host, port));
+                        }
+                        Err(_) => { /* malformed/unsupported handshake: drop the connection */ }
+                    }
+                }
+                Err(e) if is_would_block_io(&e) => {}
+                Err(_) => {}
+            }
+
+            let mut i = 0;
+            while i < pending.len() {
+                let (_, host, port) = &pending[i];
+                match session.channel_direct_tcpip(host, *port, None) {
+                    Ok(channel) => {
+                        let (stream, _, _) = pending.swap_remove(i);
+                        active.push((stream, channel));
+                        activity = true;
+                    }
+                    Err(e) if is_would_block_ssh(&e) => i += 1,
+                    Err(_) => {
+                        pending.swap_remove(i);
+                    }
+                }
+            }
+
+            activity |= pump_active(&mut active, &mut buf);
+
+            if !activity {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    });
+
+    Ok(PortForward { stop, handle: Some(handle), bound_port })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +476,136 @@ mod tests {
         assert_eq!(&buf[..n], b"hello via remote forward");
 
         forward.stop();
+    }
+
+    #[test]
+    #[ignore = "requires a live sshd; see client module docs"]
+    fn dynamic_forward_tunnels_a_socks5_connect_to_a_real_service() {
+        let echo_port = spawn_echo_server();
+        let forward = dynamic_forward(test_config(), None, 0).expect("start dynamic (SOCKS5) forward");
+
+        let mut conn = TcpStream::connect(("127.0.0.1", forward.bound_port)).expect("connect to SOCKS5 proxy port");
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socks5_client_connect(&mut conn, "127.0.0.1", echo_port).expect("SOCKS5 handshake as a client");
+
+        conn.write_all(b"hello through the SOCKS tunnel").unwrap();
+        let mut buf = [0u8; 64];
+        let n = conn.read(&mut buf).expect("read echoed bytes");
+        assert_eq!(&buf[..n], b"hello through the SOCKS tunnel");
+
+        forward.stop();
+    }
+
+    /// The client side of a minimal SOCKS5 CONNECT handshake, standing in
+    /// for a real SOCKS5 client library in the one test above that needs
+    /// to drive [`dynamic_forward`] end-to-end. Panics/returns `Err` on
+    /// any unexpected reply byte rather than silently proceeding.
+    fn socks5_client_connect(conn: &mut TcpStream, host: &str, port: u16) -> std::io::Result<()> {
+        conn.write_all(&[0x05, 0x01, 0x00])?; // version 5, 1 method, no-auth
+        let mut method_reply = [0u8; 2];
+        conn.read_exact(&mut method_reply)?;
+        assert_eq!(method_reply, [0x05, 0x00], "server should accept no-auth");
+
+        let octets: Vec<u8> = host.split('.').map(|p| p.parse().unwrap()).collect();
+        let mut request = vec![0x05, 0x01, 0x00, 0x01];
+        request.extend_from_slice(&octets);
+        request.extend_from_slice(&port.to_be_bytes());
+        conn.write_all(&request)?;
+
+        let mut reply = [0u8; 10];
+        conn.read_exact(&mut reply)?;
+        assert_eq!(reply[1], 0x00, "SOCKS5 CONNECT should succeed");
+        Ok(())
+    }
+
+    #[test]
+    fn socks5_handshake_parses_an_ipv4_connect_request() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            do_socks5_handshake(&mut stream)
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        socks5_client_connect(&mut client, "93.184.216.34", 443).unwrap();
+
+        let (host, port) = server.join().unwrap().expect("handshake should parse cleanly");
+        assert_eq!(host, "93.184.216.34");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn socks5_handshake_parses_a_domain_name_connect_request() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            do_socks5_handshake(&mut stream)
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method_reply = [0u8; 2];
+        client.read_exact(&mut method_reply).unwrap();
+
+        let domain = b"example.com";
+        let mut request = vec![0x05, 0x01, 0x00, 0x03, domain.len() as u8];
+        request.extend_from_slice(domain);
+        request.extend_from_slice(&80u16.to_be_bytes());
+        client.write_all(&request).unwrap();
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x00);
+
+        let (host, port) = server.join().unwrap().expect("handshake should parse cleanly");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn socks5_handshake_rejects_a_non_connect_command() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            do_socks5_handshake(&mut stream)
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method_reply = [0u8; 2];
+        client.read_exact(&mut method_reply).unwrap();
+
+        // CMD = 0x02 (BIND), which this handshake doesn't support.
+        client.write_all(&[0x05, 0x02, 0x00, 0x01, 127, 0, 0, 1, 0, 80]).unwrap();
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x07, "should reply 'command not supported'");
+
+        assert_eq!(server.join().unwrap(), Err(Socks5Error::UnsupportedCommand));
+    }
+
+    #[test]
+    fn socks5_handshake_rejects_wrong_protocol_version() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            do_socks5_handshake(&mut stream)
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(&[0x04, 0x01, 0x00]).unwrap(); // SOCKS4, not SOCKS5
+
+        assert_eq!(server.join().unwrap(), Err(Socks5Error::UnsupportedVersion));
     }
 }
