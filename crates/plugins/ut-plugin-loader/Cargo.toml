@@ -1,0 +1,15 @@
+[package]
+name = "ut-plugin-loader"
+description = "Dynamic plugin loading (Section 19) — loads a signed-and-verified cdylib behind a stable C ABI, never a raw Rust trait object across the dylib boundary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ut-plugin-api = { path = "../ut-plugin-api" }
+ut-plugin-signing = { path = "../ut-plugin-signing" }
+libloading = "0.8"
+thiserror = "1"
+
+[dev-dependencies]
+ut-safety = { path = "../../core/ut-safety" }

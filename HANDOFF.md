@@ -9,10 +9,10 @@ then `GOTCHAS.md` before writing any code.
 
 - **Branch**: `claude/upbeat-sagan-bfhhua` (this is the active development
   branch — push here unless told otherwise).
-- **Latest commit**: `5c1d246` — "Add ut-palette: a real fuzzy command
-  palette, wired into ut-gui (Ctrl+P)".
+- **Latest commit**: dynamic plugin loading (`ut-plugin-loader` +
+  `ut-plugin-loader-fixture`) — see changelog below.
 - **Tree is clean**: no uncommitted changes as of this handoff.
-- **25 crates, 308 tests, all passing, `cargo clippy --workspace
+- **27 crates, 314+ tests, all passing, `cargo clippy --workspace
   --all-targets` clean.** This has been true after every commit in this
   branch's history — keep it true.
 - **No PR has been opened.** All work has been pushed directly to the
@@ -68,22 +68,31 @@ user has consistently delegated that choice.
 
 ## What just happened, in build order (newest first)
 
-1. **`ut-palette`** — fuzzy command palette (fzf-style scoring), wired
+1. **`ut-plugin-loader` + `ut-plugin-loader-fixture`** — dynamic plugin
+   loading: `load_verified` won't `dlopen` a `.so` until its bytes pass
+   `ut-plugin-signing::Keyring::verify`. Deliberately *not* a `dyn Plugin`
+   trait object across the dylib boundary (vtable layout isn't a stable
+   ABI across toolchains) — instead five `extern "C"` functions over an
+   opaque instance pointer and a tagged-string wire protocol for
+   `PluginAction`. Verified by actually `cargo build`-ing the fixture
+   crate as a cdylib and `dlopen`-ing the real `.so` in a test, not a
+   mock. This was roadmap item #1 ("the highest-risk remaining item").
+2. **`ut-palette`** — fuzzy command palette (fzf-style scoring), wired
    into `ut-gui` as Ctrl+P. Verified with screenshots showing the overlay
    filtering/ranking results and a `--palette-confirm` flag proving a
    selected action actually dispatches (pane count 1→2).
-2. **Workflow export** — `ut-plugin-workflow::export` renders a workflow
+3. **Workflow export** — `ut-plugin-workflow::export` renders a workflow
    as a Bash/Zsh/Fish/PowerShell script; `text_format` round-trips
    JSON/YAML. Bash/Zsh/Fish generators are verified by actually running
    the generated script through the real interpreter (installed `zsh`
    and `fish` in this sandbox specifically for this).
-3. **SFTP + port forwarding** — `ut-plugin-ssh::sftp`/`forward`. Verified
+4. **SFTP + port forwarding** — `ut-plugin-ssh::sftp`/`forward`. Verified
    against a real local `sshd` (upload/download/mkdir/rename/rmdir, and
    both `local_forward`/`remote_forward` tunneling real TCP traffic).
-4. **`ut-gui`** — the native windowed GUI (eframe/egui), reusing
+5. **`ut-gui`** — the native windowed GUI (eframe/egui), reusing
    `ut-tui::App` unmodified. Verified with real screenshots under Xvfb
    (Mesa/llvmpipe software rendering, no GPU needed).
-5. **Five parallel builds in one round**: `ut-plugin-signing` (ed25519
+6. **Five parallel builds in one round**: `ut-plugin-signing` (ed25519
    manifest signing), `ut-daemon` (the real multiplexer — named sessions
    surviving detach/reattach over a Unix socket), `ut-tui` (the first real
    interactive front end), `ut-plugin-ai`'s `NetworkAssistant`

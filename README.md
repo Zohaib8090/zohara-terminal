@@ -31,6 +31,8 @@ crates/
 ├── plugins/         # permission-scoped, depend only on ut-plugin-api + core
 │   ├── ut-plugin-api  # the Plugin trait + PluginContext — the enforcement point for permissions
 │   ├── ut-plugin-signing # ed25519 manifest signing/verification against a trusted keyring
+│   ├── ut-plugin-loader # loads a signed-and-verified .so behind a stable C ABI (no raw trait objects across dylib)
+│   ├── ut-plugin-loader-fixture # test-only cdylib built against the loader's real ABI, for end-to-end dlopen tests
 │   ├── ssh                 # HostProfile + config import + SshClient (connect/exec), SFTP, port forwarding
 │   ├── package-manager        # pacman/checkupdates output parsing (update previews, tx size)
 │   ├── workflow                   # command-sequence engine + JSON/YAML round-trip + Bash/Zsh/Fish/PowerShell export
@@ -146,7 +148,7 @@ xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/palette.png \
 
 ```
 cargo build --workspace
-cargo test --workspace     # 308 tests across 25 crates, all offline/hermetic
+cargo test --workspace     # 314+ tests across 27 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
@@ -198,6 +200,19 @@ cargo test -p ut-plugin-ssh -- --ignored
   checks a plugin's signature against publisher keys the *plugin manager*
   already trusts — never a key embedded in the package itself, which an
   attacker could just as easily generate.
+- **Dynamic plugins cross the dylib boundary as a C ABI, never a Rust
+  trait object.** `ut-plugin-loader` was tempted to export `extern "C" fn
+  create() -> *mut dyn Plugin` and hand the host a live trait object —
+  simpler, but a `dyn Trait` pointer's vtable layout is an implementation
+  detail of one specific rustc build, so it silently breaks (not a clean
+  error) the moment host and plugin toolchains drift. Instead it defines
+  five `extern "C"` functions over an opaque `*mut c_void` instance and
+  plain C strings, with a small tagged-string wire protocol for
+  `PluginAction` — genuinely stable, at the cost of a dynamically-loaded
+  plugin getting a narrower capability surface (no borrowed
+  `PluginContext`) than an in-process one. `ut-plugin-loader-fixture` is a
+  real cdylib built against that ABI so the loader's tests prove an actual
+  `dlopen`, not a mock.
 
 ## What's not here yet
 
@@ -213,10 +228,16 @@ wired to it, neither built yet. SSH now has a real
 `SshClient`, SFTP browser, and local/remote port forwarding — still
 missing: dynamic (SOCKS) forwarding and ProxyJump chaining (see
 `ut-plugin-ssh::forward`'s module docs for why dynamic forwarding
-specifically was scoped out). Workflow editors/exporters, actual dynamic
-plugin loading (signing/verification exists in `ut-plugin-signing`;
-loading a `.so` behind that check is still future work), and
-llama.cpp/remote-provider AI backends (Ollama is implemented; the
+specifically was scoped out). Dynamic plugin loading now works
+end-to-end (`ut-plugin-loader::load_verified` won't open a `.so` whose
+signature/hash don't check out against `ut-plugin-signing::Keyring`) but
+nothing above it is wired up yet — no on-disk plugin directory scan, no
+`ut-session`/`ut-tui`/`ut-gui` integration turning a `LoadedPlugin` into
+calls on `on_command`/`on_output` as real input/output flows through, and
+a dynamically-loaded plugin still can't see a `PluginContext` (by
+design — see that crate's module docs) so it can't yet do anything an
+in-process plugin couldn't do more simply. A visual workflow editor and a
+llama.cpp/remote-provider AI backend (Ollama is implemented; the
 `AiProvider` trait is what a second backend implements) round out the
 list — all described in [`docs/SPEC.md`](docs/SPEC.md). The crate layout
 above is built so each of those is an addition to one crate, not a

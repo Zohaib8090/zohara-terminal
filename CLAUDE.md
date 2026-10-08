@@ -35,6 +35,10 @@ that isn't.
 - **Needs nothing beyond a C toolchain + `libssl-dev`** (for `ssh2`/
   libssh2 in `ut-plugin-ssh`). No network, no display, no extra shells —
   everything in the default run is offline and hermetic.
+- `ut-plugin-loader`'s end-to-end test shells out to a real `cargo build
+  -p ut-plugin-loader-fixture` and `dlopen`s the resulting `.so` — still
+  hermetic (no network, no external service), just slower than a pure
+  unit test the first time it's not already built.
 - `ut-pty`/`ut-session`/`ut-daemon` tests spawn real local processes
   (`/bin/sh`, `/bin/cat`) — this is expected and always safe.
 - `ut-plugin-ssh`'s live-connection tests (`SshClient::connect`/`exec`,

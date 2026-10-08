@@ -2998,6 +2998,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ut-plugin-loader"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "thiserror 1.0.69",
+ "ut-plugin-api",
+ "ut-plugin-signing",
+ "ut-safety",
+]
+
+[[package]]
+name = "ut-plugin-loader-fixture"
+version = "0.1.0"
+dependencies = [
+ "ut-plugin-api",
+ "ut-plugin-loader",
+]
+
+[[package]]
 name = "ut-plugin-package-manager"
 version = "0.1.0"
 dependencies = [

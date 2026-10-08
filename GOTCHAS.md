@@ -123,6 +123,39 @@ which trivially failed because the field is legitimately named
 `timeout_secs` — fixed by checking for `"nanos"` instead, the actual
 signal of a raw `Duration` struct leaking through serde).
 
+## Dynamic plugin loading: don't export a `dyn Trait` pointer across a dylib boundary
+
+The tempting design for `ut-plugin-loader` was `extern "C" fn create() ->
+*mut dyn Plugin`: simple, and it even compiles and runs fine as long as
+host and plugin share the exact rustc build and crate graph. The problem
+is what happens the moment they don't — a `dyn Trait` value is a fat
+pointer (data pointer + vtable pointer), and the vtable's layout/address
+is an unstabilized implementation detail of one specific compiler build.
+A mismatch doesn't error cleanly; it's UB (wrong function called through
+a stale vtable, or a crash with no useful message). Used a real opaque
+`*mut c_void` instance plus five plain `extern "C"` functions and a tiny
+tagged-string wire protocol for `PluginAction` instead — more ABI
+boilerplate, but every piece of it is actually a stable C ABI, checkable
+at load time (`zohara_plugin_abi_version()`) rather than a silent trap.
+
+Also: clippy's `not_unsafe_ptr_arg_deref` (deny-by-default) flags any
+`pub extern "C" fn` that dereferences a raw pointer unless it's marked
+`pub unsafe extern "C" fn` — doesn't affect the exported symbol (dlsym
+doesn't care about Rust's `unsafe` keyword), just the Rust-side safety
+contract. Mark every ABI function that touches a pointer `unsafe`, with a
+`# Safety` doc comment on what the caller (the host) must guarantee.
+
+## Testing dynamic loading: build the fixture plugin as a cdylib via a real `cargo build` subprocess
+
+`ut-plugin-loader`'s "loads and drives a real compiled plugin" test
+shells out to `cargo build -p ut-plugin-loader-fixture --lib` before
+`dlopen`-ing the result — proving the ABI macro actually produces a
+working `.so`, not just that it expands to plausible-looking code. This
+only works because the fixture crate is `publish = false` and lives in
+the workspace purely as a test dependency; if you add a second
+dynamically-loaded plugin for tests, follow the same pattern rather than
+hand-rolling raw bytes to fake a plugin binary.
+
 ## GUI verification needs a real render, not just "it compiled"
 
 `eframe`'s `ViewportCommand::Screenshot` + a software-rendered `Xvfb`
