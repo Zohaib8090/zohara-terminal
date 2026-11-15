@@ -18,7 +18,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let effective = app.layout.effective_layout();
     let active_id = app.tab.active_pane().map(|p| p.id);
 
-    let bounds = URect { x: 0.0, y: 0.0, w: area.width as f32, h: area.height.saturating_sub(if matches!(app.prompt, PromptState::Confirming { .. }) { 4 } else { 0 }) as f32 };
+    let bounds = URect { x: 0.0, y: 0.0, w: area.width as f32, h: area.height.saturating_sub(if matches!(app.prompt, PromptState::Confirming { .. } | PromptState::ConfirmingUnknown) { 4 } else { 0 }) as f32 };
 
     for (pane_id, rect) in effective.rects(bounds) {
         let Some(terminal) = app.grid_for(pane_id) else { continue };
@@ -37,6 +37,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
         for s in report_summary {
             lines.push(Line::raw(s.clone()));
         }
+        let block = Block::default().borders(Borders::ALL).title(" confirm ");
+        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), prompt_area);
+    } else if app.prompt == PromptState::ConfirmingUnknown {
+        let prompt_area = RRect { x: 0, y: area.height.saturating_sub(4), width: area.width, height: 4 };
+        let lines: Vec<Line> = vec![
+            Line::styled("Line edited in the shell (history/completion/search) — contents unknown.", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Line::raw("y = send Enter anyway, n = erase the line (Ctrl+U) and start over"),
+        ];
         let block = Block::default().borders(Borders::ALL).title(" confirm ");
         frame.render_widget(Paragraph::new(Text::from(lines)).block(block), prompt_area);
     }

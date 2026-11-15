@@ -63,6 +63,31 @@ impl Pane {
         })
     }
 
+    /// Spawn a specific program (not the login shell) behind a PTY. This
+    /// is the path any "run this in a pane" feature sits on — an SSH
+    /// session pane, a workflow step, a test fixture (`/bin/cat` echoing
+    /// input back makes input-path tests deterministic, unlike a real
+    /// shell's prompt/greeting).
+    pub fn spawn_command(
+        id: u64,
+        program: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+        cwd: Option<&str>,
+        privilege: PrivilegeContext,
+    ) -> io::Result<Self> {
+        let pty = Pty::spawn(program, args, PtySize::new(cols, rows), cwd, &[])?;
+        Ok(Pane {
+            id,
+            pty,
+            terminal: Terminal::new(cols as usize, rows as usize),
+            title: String::new(),
+            privilege,
+            confirmation_threshold: Risk::Medium,
+        })
+    }
+
     /// Read whatever output is currently available (non-blocking assumed to
     /// be configured by the caller on the fd, or blocking with a short
     /// buffer for a dedicated reader thread) and feed it into the terminal.

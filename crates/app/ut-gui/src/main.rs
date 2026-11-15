@@ -396,7 +396,7 @@ impl eframe::App for GuiApp {
             self.char_size = Some(size);
         }
 
-        let confirming = matches!(self.app.prompt, PromptState::Confirming { .. });
+        let confirming = matches!(self.app.prompt, PromptState::Confirming { .. } | PromptState::ConfirmingUnknown);
 
         egui::TopBottomPanel::top("titlebar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -440,14 +440,27 @@ impl eframe::App for GuiApp {
 
 impl GuiApp {
     fn draw_confirmation(&mut self, ctx: &egui::Context) {
-        let PromptState::Confirming { report_summary, .. } = &self.app.prompt else { return };
-        let summary = report_summary.clone();
-        egui::TopBottomPanel::bottom("confirm").min_height(80.0).show(ctx, |ui| {
-            ui.colored_label(Color32::from_rgb(230, 200, 60), "Destructive command — send anyway? (y/n)");
-            for line in &summary {
-                ui.label(line);
+        match &self.app.prompt {
+            PromptState::Confirming { report_summary, .. } => {
+                let summary = report_summary.clone();
+                egui::TopBottomPanel::bottom("confirm").min_height(80.0).show(ctx, |ui| {
+                    ui.colored_label(Color32::from_rgb(230, 200, 60), "Destructive command — send anyway? (y/n)");
+                    for line in &summary {
+                        ui.label(line);
+                    }
+                });
             }
-        });
+            PromptState::ConfirmingUnknown => {
+                egui::TopBottomPanel::bottom("confirm").min_height(80.0).show(ctx, |ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 200, 60),
+                        "Line edited in the shell (history/completion/search) — contents unknown.",
+                    );
+                    ui.label("y = send Enter anyway, n = erase the line (Ctrl+U) and start over");
+                });
+            }
+            PromptState::Normal => {}
+        }
     }
 
     fn draw_palette(&mut self, ctx: &egui::Context) {

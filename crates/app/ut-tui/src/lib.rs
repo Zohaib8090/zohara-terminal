@@ -17,13 +17,18 @@
 //! the child process, invisibly to us. So [`App`]'s `pending_line` tracking
 //! (below) is a **best-effort local echo of what we think is on the
 //! line**, built by watching typed/backspaced characters since the last
-//! Enter — it can desync from the shell's real buffer (e.g. after a
-//! history recall via Up-arrow, or a paste containing control sequences).
-//! It is run through `ut-safety` on Enter and can hold back a destructive-
-//! looking line for confirmation, which is a real, useful safety net for
-//! the common case (typing), but it is **not** a substitute for real shell
-//! integration (a preexec/precmd hook) — that remains future work, noted
-//! in the spec's beginner-mode "Destructive-command warnings" section.
+//! Enter. It is run through `ut-safety` on Enter and can hold back a
+//! destructive-looking line for confirmation. Where the echo can't be
+//! trusted — any key that mutates the shell's buffer invisibly (history
+//! recall, Tab, Ctrl+R, Ctrl+W, Delete, Alt bindings) — the pane is marked
+//! *desynced* and Enter requires an explicit confirmation
+//! ([`PromptState::ConfirmingUnknown`]) rather than being analyzed against
+//! a stale guess; Enter's byte-identical aliases Ctrl+M/Ctrl+J go through
+//! the same gate; and cancelling a confirmation erases the line in the
+//! shell too (Ctrl+U), so "n" really cancels. This is still not a
+//! substitute for real shell integration (a preexec/precmd hook) — that
+//! remains future work, noted in the spec's beginner-mode
+//! "Destructive-command warnings" section.
 
 //! # Dynamic plugins (read before extending this integration)
 //!
@@ -45,15 +50,15 @@ mod ui;
 pub use render::{grid_to_text, pane_border_style};
 pub use ui::draw;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use ut_grid::Terminal as GridTerminal;
 use ut_input::{encode, EncodeModes, Key, Modifiers};
 use ut_plugin_api::PluginAction;
 use ut_plugin_loader::LoadedPlugin;
 use ut_plugin_signing::{Keyring, SignedManifest};
-use ut_safety::{PrivilegeContext, Report};
-use ut_session::{InputOutcome, Pane, Tab};
+use ut_safety::{PrivilegeContext, Report, Risk};
+use ut_session::{Pane, Tab};
 use ut_ui::{Direction as SplitDirection, Layout, LayoutState};
 
 /// What the UI should currently show for the active pane's input line.
@@ -64,6 +69,11 @@ pub enum PromptState {
     /// A destructive-looking command is being held back; show `report` and
     /// wait for the user to confirm (send anyway) or cancel.
     Confirming { pending_line: String, report_summary: Vec<String> },
+    /// The shell's line buffer holds something this app cannot see (it was
+    /// edited on the shell side — history recall, completion, Ctrl+R, …),
+    /// so there is nothing to analyze. Enter still has to be confirmed
+    /// explicitly, because the bytes to be executed are unknown.
+    ConfirmingUnknown,
 }
 
 /// Everything `ut-tui` needs across one frame/event: the pane tree
@@ -73,6 +83,13 @@ pub struct App {
     pub tab: Tab,
     pub layout: LayoutState,
     pending_lines: HashMap<u64, String>,
+    /// Panes whose best-effort line tracker is out of sync with the
+    /// shell's real line buffer (the user pressed a key that mutates the
+    /// buffer in ways only the shell can see — history recall, Tab,
+    /// Ctrl+R, …). Enter on such a pane must be confirmed explicitly
+    /// ([`PromptState::ConfirmingUnknown`]) rather than analyzed against a
+    /// stale guess, or shell-side edits become a safety-gate bypass.
+    desynced_lines: HashSet<u64>,
     pub prompt: PromptState,
     privilege: PrivilegeContext,
     next_id: u64,
@@ -93,12 +110,48 @@ impl App {
     pub fn new(cols: u16, rows: u16) -> std::io::Result<Self> {
         let privilege = PrivilegeContext::local_normal_user();
         let pane = Pane::spawn(1, cols, rows, None, privilege.clone())?;
+        // Non-blocking from birth: the event loop polls panes on every
+        // tick, so a blocking fd would stall it on the first idle read
+        // (the deadlock GOTCHAS.md documents).
+        pane.set_nonblocking(true)?;
         let mut tab = Tab::new(1, "main");
         tab.add_pane(pane);
         Ok(App {
             tab,
             layout: LayoutState::new(Layout::leaf(1)),
             pending_lines: HashMap::new(),
+            desynced_lines: HashSet::new(),
+            prompt: PromptState::Normal,
+            privilege,
+            next_id: 2,
+            should_quit: false,
+            plugins: Vec::new(),
+            plugin_keyring: Keyring::new(),
+            plugin_messages: Vec::new(),
+        })
+    }
+
+    #[cfg(test)]
+    /// Test-only constructor mirroring `new` but running a deterministic
+    /// command instead of the login shell — `/bin/cat` echoes exactly what
+    /// it receives, so tests can assert on written bytes without caring
+    /// what shell/prompt this machine has.
+    pub(crate) fn new_with_command(
+        program: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+    ) -> std::io::Result<Self> {
+        let privilege = PrivilegeContext::local_normal_user();
+        let pane = Pane::spawn_command(1, program, args, cols, rows, None, privilege.clone())?;
+        pane.set_nonblocking(true)?;
+        let mut tab = Tab::new(1, "main");
+        tab.add_pane(pane);
+        Ok(App {
+            tab,
+            layout: LayoutState::new(Layout::leaf(1)),
+            pending_lines: HashMap::new(),
+            desynced_lines: HashSet::new(),
             prompt: PromptState::Normal,
             privilege,
             next_id: 2,
@@ -205,6 +258,13 @@ impl App {
         let new_id = self.next_id;
         self.next_id += 1;
         let pane = Pane::spawn(new_id, cols, rows, None, self.privilege.clone())?;
+        // Split panes must be non-blocking from birth, same as the initial
+        // pane: they're polled by the same event loop, and a blocking fd
+        // here stalls the whole loop on the first idle read. (The GUI
+        // re-asserts this every frame as belt-and-braces; the TUI has no
+        // per-frame hook, so the spawn site is the one place it can be
+        // guaranteed.)
+        pane.set_nonblocking(true)?;
         self.tab.add_pane(pane);
         self.tab.focus_pane(new_id);
         self.layout.layout.split(active_id, new_id, direction);
@@ -238,20 +298,72 @@ impl App {
     /// Handle one key press for the active pane. This is the pure,
     /// testable core of the event loop — `main.rs` only translates
     /// `crossterm::event::KeyEvent` into `(Key, Modifiers)` and calls this.
+    ///
+    /// # The Enter gate and how it stays honest
+    ///
+    /// Every character the user types is forwarded to the shell as it is
+    /// typed (the shell owns its line editor); in parallel, [`App`]
+    /// accumulates a best-effort copy of the line. On Enter (or its
+    /// byte-identical aliases Ctrl+M/Ctrl+J — forwarding those raw would
+    /// execute the line with no analysis at all, which was a real bypass),
+    /// that copy is run through `ut-safety` and, if risky enough, held
+    /// back for confirmation. Two invariants keep this from becoming
+    /// theater:
+    ///
+    /// 1. *Cancel really cancels.* The typed characters are already in the
+    ///    shell's buffer, so "n" sends Ctrl+U (readline/ZLE kill-whole-
+    ///    line) — otherwise the next bare Enter would run the "cancelled"
+    ///    command. Same for confirming: only the Enter keystroke is sent,
+    ///    never the text again (it's already there; re-sending executes
+    ///    the command twice).
+    /// 2. *Unknown lines are not guessed.* Keys that mutate the shell's
+    ///    buffer invisibly (history recall, Tab completion, Ctrl+R, Ctrl+W,
+    ///    Delete, Alt bindings) mark the pane desynced
+    ///    ([`PromptState::ConfirmingUnknown`] on Enter) instead of
+    ///    analyzing a stale copy. Pure cursor moves don't desync: they
+    ///    don't change the buffer's content, only where the next typed
+    ///    character lands.
     pub fn handle_key(&mut self, key: Key, mods: Modifiers) {
         if let PromptState::Confirming { pending_line, .. } = self.prompt.clone() {
             match key {
                 Key::Char('y') | Key::Char('Y') => {
-                    self.force_send_line(&pending_line);
+                    self.send_confirmed_line(&pending_line);
                     self.prompt = PromptState::Normal;
                 }
                 Key::Char('n') | Key::Char('N') | Key::Escape => {
                     self.prompt = PromptState::Normal;
                     if let Some(id) = self.active_pane_id() {
-                        self.pending_lines.insert(id, String::new());
+                        self.cancel_pending_line(id);
                     }
                 }
                 _ => {} // ignore other input while a confirmation is pending
+            }
+            return;
+        }
+        if self.prompt == PromptState::ConfirmingUnknown {
+            match key {
+                Key::Char('y') | Key::Char('Y') => {
+                    // The line's characters are already in the shell's
+                    // editor (typed before it went unknown, or edited on
+                    // the shell side) — the confirmation sends the Enter
+                    // keystroke only, via the raw path this pane's other
+                    // keystrokes use.
+                    if let Some(id) = self.active_pane_id() {
+                        if let Some(pane) = self.tab.panes_mut().iter_mut().find(|p| p.id == id) {
+                            let _ = pane.write_raw(b"\r");
+                        }
+                        self.pending_lines.insert(id, String::new());
+                        self.desynced_lines.remove(&id);
+                    }
+                    self.prompt = PromptState::Normal;
+                }
+                Key::Char('n') | Key::Char('N') | Key::Escape => {
+                    self.prompt = PromptState::Normal;
+                    if let Some(id) = self.active_pane_id() {
+                        self.cancel_pending_line(id);
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -271,27 +383,84 @@ impl App {
             }
             Key::Char('c') if mods.ctrl => {
                 self.pending_lines.insert(id, String::new());
+                self.desynced_lines.remove(&id);
                 self.forward_raw(id, key, mods);
             }
             Key::Char('u') if mods.ctrl => {
                 self.pending_lines.insert(id, String::new());
+                self.desynced_lines.remove(&id);
                 self.forward_raw(id, key, mods);
             }
-            Key::Enter => {
-                let line = self.pending_lines.entry(id).or_default().clone();
-                let report = ut_safety::analyze(&line, &self.privilege);
-                let blocks = report.highest_risk().map(|r| r >= ut_safety::Risk::Medium).unwrap_or(false);
-                if blocks && !line.trim().is_empty() {
-                    self.prompt = PromptState::Confirming { pending_line: line, report_summary: summarize(&report) };
-                } else {
-                    self.forward_raw(id, key, mods);
-                    self.pending_lines.insert(id, String::new());
-                    if !line.trim().is_empty() {
-                        self.notify_plugins_of_command(&line);
-                    }
+            Key::Enter => self.submit_active_line(id),
+            Key::Char('m') if mods.ctrl => self.submit_active_line(id),
+            Key::Char('j') if mods.ctrl => self.submit_active_line(id),
+            _ => {
+                if line_buffer_mutation(key, mods) {
+                    self.pending_lines.remove(&id);
+                    self.desynced_lines.insert(id);
                 }
+                self.forward_raw(id, key, mods);
             }
-            _ => self.forward_raw(id, key, mods),
+        }
+    }
+
+    /// The Enter gate, shared by Enter, Ctrl+M, and Ctrl+J (all three are
+    /// accept-line to a readline-based shell). Uses the pane's own
+    /// `confirmation_threshold` rather than a hardcoded level, so profile
+    /// sensitivity settings actually apply.
+    fn submit_active_line(&mut self, id: u64) {
+        if self.desynced_lines.contains(&id) {
+            // We don't know what the shell's buffer holds (shell-side
+            // edits happened), so there is nothing to analyze — require an
+            // explicit confirmation before the Enter reaches the shell.
+            self.prompt = PromptState::ConfirmingUnknown;
+            return;
+        }
+        let line = self.pending_lines.entry(id).or_default().clone();
+        let threshold = self
+            .tab
+            .panes()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.confirmation_threshold)
+            .unwrap_or(Risk::Medium);
+        let report = ut_safety::analyze(&line, &self.privilege);
+        let blocks = report.highest_risk().map(|r| r >= threshold).unwrap_or(false);
+        if blocks && !line.trim().is_empty() {
+            self.prompt = PromptState::Confirming { pending_line: line, report_summary: summarize(&report) };
+        } else {
+            self.forward_raw(id, Key::Enter, Modifiers::none());
+            self.pending_lines.insert(id, String::new());
+            self.desynced_lines.remove(&id);
+            if !line.trim().is_empty() {
+                self.notify_plugins_of_command(&line);
+            }
+        }
+    }
+
+    /// A cancelled pending line was already forwarded to the shell char by
+    /// char, so the shell's line editor still holds it. Send Ctrl+U
+    /// (readline/ZLE kill-whole-line) to erase it there too — otherwise
+    /// the "cancelled" command runs on the next bare Enter.
+    fn cancel_pending_line(&mut self, id: u64) {
+        self.forward_raw(id, Key::Char('u'), Modifiers::ctrl());
+        self.pending_lines.insert(id, String::new());
+        self.desynced_lines.remove(&id);
+    }
+
+    /// Send a line the user explicitly confirmed. The characters are
+    /// already in the shell's editor (they were forwarded raw as typed), so
+    /// only the Enter keystroke goes out — re-sending the text would make
+    /// the shell execute the command twice (concatenated, as one line).
+    fn send_confirmed_line(&mut self, line: &str) {
+        let Some(id) = self.active_pane_id() else { return };
+        if let Some(pane) = self.tab.panes_mut().iter_mut().find(|p| p.id == id) {
+            let _ = pane.write_raw(b"\r");
+        }
+        self.pending_lines.insert(id, String::new());
+        self.desynced_lines.remove(&id);
+        if !line.trim().is_empty() {
+            self.notify_plugins_of_command(line);
         }
     }
 
@@ -306,24 +475,6 @@ impl App {
         }
     }
 
-    fn force_send_line(&mut self, line: &str) {
-        let Some(id) = self.active_pane_id() else { return };
-        if let Some(pane) = self.tab.panes_mut().iter_mut().find(|p| p.id == id) {
-            match pane.submit_input(line) {
-                Ok(InputOutcome::Written) => {}
-                Ok(InputOutcome::NeedsConfirmation(_)) => {
-                    // Already confirmed by the user via the TUI prompt — bypass explicitly.
-                    let _ = pane.submit_input_forced(&format!("{line}\r"));
-                }
-                Err(_) => {}
-            }
-        }
-        self.pending_lines.insert(id, String::new());
-        if !line.trim().is_empty() {
-            self.notify_plugins_of_command(line);
-        }
-    }
-
     pub fn grid_for(&self, pane_id: u64) -> Option<&GridTerminal> {
         self.tab.panes().iter().find(|p| p.id == pane_id).map(|p| &p.terminal)
     }
@@ -331,6 +482,27 @@ impl App {
 
 fn summarize(report: &Report) -> Vec<String> {
     report.findings.iter().take(3).map(|f| format!("[{}] {}", f.risk, f.explanation)).collect()
+}
+
+/// Whether `key` mutates the shell's line buffer in a way the local
+/// tracker cannot follow. These desync the tracker (Enter then requires
+/// [`PromptState::ConfirmingUnknown`]); keys *not* listed here leave the
+/// buffer's content alone (pure cursor moves, Escape, F-keys) or are
+/// already tracked (chars, Backspace, Ctrl+C, Ctrl+U).
+fn line_buffer_mutation(key: Key, mods: Modifiers) -> bool {
+    match key {
+        // History recall (replaces the whole line), completion (inserts
+        // text), Delete (removes at cursor), Insert (overwrite mode).
+        Key::Up | Key::Down | Key::Tab | Key::Delete | Key::Insert => true,
+        // PageUp/PageDown are history keys in some shells (e.g. zsh).
+        Key::PageUp | Key::PageDown => true,
+        // Emacs bindings that edit unseen: Ctrl+R (search), Ctrl+W (kill
+        // word back), Ctrl+K (kill to end), Ctrl+Y (yank), Ctrl+T (transpose).
+        Key::Char('r') | Key::Char('w') | Key::Char('k') | Key::Char('y') | Key::Char('t') if mods.ctrl => true,
+        // All other Alt/meta bindings are emacs word/line operations by
+        // default (Alt+D, Alt+Backspace, …) — treat them as edits.
+        _ => mods.alt,
+    }
 }
 
 /// Load and verify one `<name>.so` against its sibling
@@ -367,6 +539,7 @@ fn record_plugin_action(messages: &mut Vec<String>, action: &PluginAction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ut_safety::Risk;
 
     // App::new spawns a real shell, which is exactly what ut-session's own
     // tests do; these tests exercise the pure input/state logic on top of it.
@@ -449,6 +622,167 @@ mod tests {
         let before = app.prompt.clone();
         app.handle_key(Key::Char('x'), Modifiers::none());
         assert_eq!(app.prompt, before); // still confirming, unaffected
+    }
+
+    /// Ctrl+M is byte-identical to Enter for a readline-based shell —
+    /// forwarding it raw used to execute the line with no safety check at
+    /// all. It must go through the same gate.
+    #[test]
+    fn ctrl_m_executes_the_line_through_the_gate() {
+        let mut app = App::new(80, 24).unwrap();
+        for c in "rm -rf /".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Char('m'), Modifiers::ctrl());
+        assert!(matches!(app.prompt, PromptState::Confirming { .. }));
+    }
+
+    #[test]
+    fn ctrl_j_executes_the_line_through_the_gate() {
+        let mut app = App::new(80, 24).unwrap();
+        for c in "rm -rf /".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Char('j'), Modifiers::ctrl());
+        assert!(matches!(app.prompt, PromptState::Confirming { .. }));
+    }
+
+    /// A cancelled confirmation must not leave the command sitting in the
+    /// shell's readline buffer: "n" erases the line there too (Ctrl+U),
+    /// so the next bare Enter can't run what the user said no to.
+    #[test]
+    fn cancelling_a_confirmation_clears_the_pane_state() {
+        let mut app = App::new(80, 24).unwrap();
+        let id = app.active_pane_id().unwrap();
+        for c in "rm -rf /".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Enter, Modifiers::none());
+        app.handle_key(Key::Escape, Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+        assert_eq!(app.pending_lines.get(&id).unwrap(), "");
+    }
+
+    /// History recall (Up-arrow) replaces the shell's line invisibly —
+    /// the local tracker can't know what's there, so Enter must ask the
+    /// user instead of analyzing a stale guess (the old behavior analyzed
+    /// the pre-recall line, a real bypass).
+    #[test]
+    fn enter_after_history_recall_requires_unknown_confirmation() {
+        let mut app = App::new(80, 24).unwrap();
+        for c in "echo typed".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Up, Modifiers::none());
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert!(matches!(app.prompt, PromptState::ConfirmingUnknown));
+    }
+
+    #[test]
+    fn tab_completion_requires_unknown_confirmation_on_enter() {
+        let mut app = App::new(80, 24).unwrap();
+        for c in "cat /etc/pas".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Tab, Modifiers::none());
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert!(matches!(app.prompt, PromptState::ConfirmingUnknown));
+    }
+
+    /// Pure cursor moves don't change the buffer's content — moving within
+    /// the line must not turn every later Enter into a confirmation.
+    #[test]
+    fn cursor_moves_do_not_desync_the_tracker() {
+        let mut app = App::new(80, 24).unwrap();
+        for c in "ls -la".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Left, Modifiers::none());
+        app.handle_key(Key::Right, Modifiers::none());
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+    }
+
+    #[test]
+    fn unknown_confirmation_confirm_resets_state() {
+        let mut app = App::new(80, 24).unwrap();
+        let id = app.active_pane_id().unwrap();
+        app.handle_key(Key::Up, Modifiers::none());
+        app.handle_key(Key::Enter, Modifiers::none());
+        app.handle_key(Key::Char('y'), Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+        assert_eq!(app.pending_lines.get(&id).unwrap(), "");
+    }
+
+    #[test]
+    fn unknown_confirmation_cancel_resets_state() {
+        let mut app = App::new(80, 24).unwrap();
+        let id = app.active_pane_id().unwrap();
+        app.handle_key(Key::Down, Modifiers::none());
+        app.handle_key(Key::Enter, Modifiers::none());
+        app.handle_key(Key::Char('n'), Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+        assert_eq!(app.pending_lines.get(&id).unwrap(), "");
+    }
+
+    /// The pane's `confirmation_threshold` — the profile-driven
+    /// "warning sensitivity" knob — must actually be used, not a hardcoded
+    /// Medium in the gate. `sudo true` is a Medium `root-command` finding;
+    /// at a Critical threshold it should pass without a prompt.
+    #[test]
+    fn pane_confirmation_threshold_is_respected() {
+        let mut app = App::new(80, 24).unwrap();
+        let id = app.active_pane_id().unwrap();
+        let pane = app.tab.panes_mut().iter_mut().find(|p| p.id == id).unwrap();
+        pane.confirmation_threshold = Risk::Critical;
+        for c in "sudo true".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+    }
+
+    /// End-to-end regression for the double-send bug: confirming used to
+    /// re-send the whole line after the typed characters were already in
+    /// the shell's buffer, so the shell received (and would have run)
+    /// `sudo truesudo true`. Only the Enter keystroke may go out.
+    ///
+    /// Hermetic proof: the pane runs `sh -c 'cat > FILE'` — whatever bytes
+    /// actually reach the child end up verbatim in FILE, so the test
+    /// asserts on the *received* bytes, not on a screen echo (a
+    /// canonical-mode PTY double-echoes input, which would drown the
+    /// signal).
+    #[test]
+    fn confirmed_command_is_sent_once_not_doubled() {
+        use std::time::Duration;
+        let file = std::env::temp_dir().join(format!("ut-tui-confirm-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let script = format!("cat > {}", file.display());
+        let mut app = App::new_with_command("/bin/sh", &["-c", &script], 80, 24).unwrap();
+        for c in "sudo true".chars() {
+            app.handle_key(Key::Char(c), Modifiers::none());
+        }
+        app.handle_key(Key::Enter, Modifiers::none());
+        assert!(matches!(app.prompt, PromptState::Confirming { .. }));
+        app.handle_key(Key::Char('y'), Modifiers::none());
+        assert_eq!(app.prompt, PromptState::Normal);
+
+        // End the line so cat gets it, then send Ctrl+D (EOF) so cat
+        // exits and flushes — via the same handle_key path a user types.
+        app.handle_key(Key::Char('d'), Modifiers::ctrl());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            app.pump_all();
+            if let Ok(contents) = std::fs::read_to_string(&file) {
+                if contents.contains('\n') || std::time::Instant::now() > deadline {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let contents = std::fs::read_to_string(&file).unwrap_or_default();
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(contents, "sudo true\n", "child must receive the line exactly once");
     }
 
     #[test]
