@@ -9,14 +9,51 @@ then `GOTCHAS.md` before writing any code.
 
 - **Branch**: `claude/upbeat-sagan-bfhhua` (this is the active development
   branch — push here unless told otherwise).
-- **Latest commit**: SSH dynamic (SOCKS5) port forwarding
-  (`ut-plugin-ssh::forward::dynamic_forward`) — see changelog below.
-- **Tree is clean**: no uncommitted changes as of this handoff.
-- **27 crates, 319+ tests, all passing, `cargo clippy --workspace
-  --all-targets` clean.** This has been true after every commit in this
-  branch's history — keep it true.
+- **Latest work** (2026-11-16): a security/quality audit of the whole
+  repo, followed by four fix commits:
+  1. `41c05a2` — confirmation-gate bypasses closed (Ctrl+M/Ctrl+J now
+     gated; cancel sends Ctrl+U so the shell line is really erased;
+     shell-side edits → `ConfirmingUnknown` instead of analyzing a stale
+     line; confirm sends only the Enter keystroke; pane
+     `confirmation_threshold` wired) + the TUI fresh-split deadlock fixed
+     (panes set non-blocking at both spawn sites).
+  2. `5ad8c0d` — ut-safety wrapper recursion (`sh -c`/`eval`/`sudo -u`/
+     `env`/`nohup`/`xargs`), new destructive-program rules (tee/cp/mv to
+     `/dev/`, truncate, mke2fs/mkswap, docker prune, find -execdir, shred
+     of files, non-recursive chmod on system paths), kill -1 false
+     positive fixed, lone-CR paste bypass closed (lexer separator +
+     paste control-char finding; CRLF stays benign).
+  3. `32cf5fd` — `.github/workflows/test.yml`: CI now runs
+     `cargo test --workspace` and `clippy -D warnings` (they were never
+     run in CI before); newer-clippy warnings swept.
+  4. `f00d395` — README updated to match.
+- 27 crates, **344+ tests**, all passing, `cargo clippy --workspace
+  --all-targets` clean — and now enforced by CI, not just local runs.
 - **No PR has been opened.** All work has been pushed directly to the
   branch; the user hasn't asked for a PR yet.
+
+### Audit findings still open (the next fixes, roughly by stakes)
+
+- **TOCTOU in plugin loading** (`ut-plugin-loader`): bytes verified at
+  T1, `.so` dlopen'd from the same path at T2.
+- **Daemon socket has no auth/permissions design**; `ut-daemon`'s 23
+  `lock().unwrap()` calls cascade-fail on a poisoned mutex.
+- **Plugin `Permissions.network`/`filesystem_roots`/`elevate_privileges`
+  documented but never enforced** in `PluginContext`; plugin keyring has
+  no persistence/key-management; plugin panics abort the host (no
+  `catch_unwind` across FFI).
+- **SSH**: host-key verification opt-in (`Option<&KnownHosts>`) with no
+  `~/.ssh/known_hosts` plumbing or TOFU; `SshConfig` derives Debug with
+  plaintext passwords/keys; ProxyJump is parse+toast only.
+- **Five orphan service crates** (`ut-daemon`, `ut-profile`,
+  `ut-history`, `ut-notify`, `ut-search`) have zero dependents: no
+  config-file location, no desktop notifications, no search keybinding,
+  no history persistence/redaction.
+- **Front-end must-haves**: no mouse support, no copy/paste or clipboard
+  (no OSC 52), scrollback stored but unviewable, TUI drops
+  `Event::Resize`, no visible cursor in the TUI, one tab only, dead
+  panes never reaped or offered respawn.
+- `ut-cli` quoting: `rest.join(" ")` destroys quoted args; no --json.
 
 ## Git identity note (important, don't lose this)
 
