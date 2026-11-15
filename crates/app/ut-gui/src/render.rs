@@ -77,10 +77,10 @@ fn to_text_format(style: &Style, font: FontId) -> TextFormat {
         }
     }
     if style.underline || style.double_underline {
-        fmt.underline = egui::Stroke::new(1.0, fmt.color);
+        fmt.underline = egui::Stroke::new(1.0_f32, fmt.color);
     }
     if style.strikethrough {
-        fmt.strikethrough = egui::Stroke::new(1.0, fmt.color);
+        fmt.strikethrough = egui::Stroke::new(1.0_f32, fmt.color);
     }
     if style.italic {
         fmt.italics = true;

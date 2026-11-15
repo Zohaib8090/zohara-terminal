@@ -150,7 +150,7 @@ mod tests {
     fn real_world_ranking_prefers_the_obviously_right_item() {
         let candidates = ["New SSH Session", "Refresh Package Databases", "Search Files"];
         let mut scored: Vec<(i64, &str)> = candidates.iter().filter_map(|&c| score("ssh", c).map(|s| (s, c))).collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         assert_eq!(scored[0].1, "New SSH Session");
     }
 }

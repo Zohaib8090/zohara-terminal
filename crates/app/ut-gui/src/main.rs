@@ -534,7 +534,7 @@ impl GuiApp {
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(screen_rect), |ui| {
                 egui::Frame::none()
-                    .stroke(egui::Stroke::new(if focused { 2.0 } else { 1.0 }, stroke_color))
+                    .stroke(egui::Stroke::new(if focused { 2.0_f32 } else { 1.0_f32 }, stroke_color))
                     .inner_margin(6.0)
                     .show(ui, |ui| {
                         ui.set_min_size(screen_rect.size() - egui::vec2(12.0, 12.0));
@@ -572,22 +572,22 @@ impl GuiApp {
                                     CursorShape::Block => {
                                         let rect = egui::Rect::from_min_size(pos, cell);
                                         if focused {
-                                            painter.rect_filled(rect, 0.0, color.gamma_multiply(0.45));
+                                            painter.rect_filled(rect, 0.0_f32, color.gamma_multiply(0.45));
                                         } else {
-                                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, color));
+                                            painter.rect_stroke(rect, 0.0_f32, egui::Stroke::new(1.0_f32, color));
                                         }
                                     }
                                     CursorShape::Underline => {
-                                        let y = pos.y + cell.y - 2.0;
+                                        let y = pos.y + cell.y - 2.0_f32;
                                         painter.line_segment(
                                             [egui::pos2(pos.x, y), egui::pos2(pos.x + cell.x, y)],
-                                            egui::Stroke::new(2.0, color),
+                                            egui::Stroke::new(2.0_f32, color),
                                         );
                                     }
                                     CursorShape::Bar => {
                                         painter.line_segment(
                                             [pos, egui::pos2(pos.x, pos.y + cell.y)],
-                                            egui::Stroke::new(2.0, color),
+                                            egui::Stroke::new(2.0_f32, color),
                                         );
                                     }
                                 }

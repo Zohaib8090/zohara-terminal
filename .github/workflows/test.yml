@@ -1,0 +1,30 @@
+name: Test
+
+# Runs the workspace's own test suite and lint — the package.yml workflow
+# only smoke-tests the installed binaries, so without this the "319+ tests
+# pass" claim was enforced by nobody: no commit was ever gated on
+# `cargo test`/`clippy`. Runs on the same pushes/PRs as the package build.
+on:
+  push:
+    branches:
+      - claude/upbeat-sagan-bfhhua
+      - main
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the C toolchain deps the ssh2 binding needs
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      # Toolchain version comes from rust-toolchain.toml if one exists;
+      # today the workspace tracks stable, so the runner's stable is used.
+      - name: Run the full test suite (hermetic/offline by default)
+        run: cargo test --workspace
+
+      - name: Lint (deny warnings — the workspace is clippy-clean)
+        run: cargo clippy --workspace --all-targets -- -D warnings
