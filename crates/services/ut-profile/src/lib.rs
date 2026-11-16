@@ -25,6 +25,16 @@ impl From<std::io::Error> for ProfileServiceError {
     }
 }
 
+impl std::fmt::Display for ProfileServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProfileServiceError::Io(e) => write!(f, "I/O error: {e}"),
+            ProfileServiceError::Config(e) => write!(f, "{e}"),
+            ProfileServiceError::NotFound(name) => write!(f, "profile '{name}' not found"),
+        }
+    }
+}
+
 impl From<ConfigError> for ProfileServiceError {
     fn from(e: ConfigError) -> Self {
         ProfileServiceError::Config(e)
@@ -53,6 +63,22 @@ impl ProfileService {
         };
         let active_profile = config.default_profile.clone();
         Ok(ProfileService { path, config, active_profile })
+    }
+
+    /// Like [`Self::load_or_default`], but a corrupt/unreadable config
+    /// file becomes an *empty* config at the same path (so a later save
+    /// repairs it) instead of an error. The message is returned so a UI
+    /// can tell the user what happened — the app must still start.
+    pub fn load_or_recover(path: impl Into<PathBuf>) -> (Self, Option<String>) {
+        let path = path.into();
+        match Self::load_or_default(&path) {
+            Ok(s) => (s, None),
+            Err(e) => {
+                let message = format!("{e}");
+                let service = ProfileService { path, config: Config::default(), active_profile: None };
+                (service, Some(message))
+            }
+        }
     }
 
     pub fn config(&self) -> &Config {

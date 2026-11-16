@@ -1,2 +1,6 @@
 /target
 **/*.rs.bk
+
+# makepkg output (built artifacts, never in git)
+/pkg/
+*.pkg.tar.zst

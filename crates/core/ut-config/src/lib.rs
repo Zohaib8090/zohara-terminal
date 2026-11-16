@@ -44,6 +44,12 @@ pub struct Profile {
     /// Whether destructive-command confirmation prompts are shown for this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_destructive_commands: Option<bool>,
+    /// How readily destructive-command confirmations fire, as a kebab-case
+    /// `ut_safety::Risk` name ("low", "medium", "high", "critical").
+    /// "medium" (the default) confirms common footguns; "critical" only
+    /// the disk-destroyers; "low" almost everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_sensitivity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
 
@@ -84,6 +90,7 @@ impl Profile {
             scrollback_lines: self.scrollback_lines.or(parent.scrollback_lines),
             bell_style: self.bell_style.or(parent.bell_style),
             confirm_destructive_commands: self.confirm_destructive_commands.or(parent.confirm_destructive_commands),
+            warning_sensitivity: self.warning_sensitivity.clone().or_else(|| parent.warning_sensitivity.clone()),
             tab_color: self.tab_color.clone().or_else(|| parent.tab_color.clone()),
             startup_commands,
         }

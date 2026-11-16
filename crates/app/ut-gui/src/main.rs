@@ -30,6 +30,7 @@ use ut_grid::CursorShape;
 use ut_input::{Key as UtKey, Modifiers as UtMods};
 use ut_palette::{Category, Palette, PaletteItem, PaletteState};
 use ut_tui::{App, PromptState};
+use ut_gui::settings;
 use ut_ui::{Direction as SplitDirection, Rect as URect};
 
 struct Args {
@@ -39,6 +40,7 @@ struct Args {
     auto_split: Option<SplitDirection>,
     open_palette: Option<String>,
     palette_confirm: bool,
+    open_settings: bool,
 }
 
 fn parse_args() -> Args {
@@ -48,6 +50,7 @@ fn parse_args() -> Args {
     let mut auto_split = None;
     let mut open_palette = None;
     let mut palette_confirm = false;
+    let mut open_settings = false;
     let raw: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < raw.len() {
@@ -80,15 +83,20 @@ fn parse_args() -> Args {
                 palette_confirm = true;
                 i += 1;
             }
+            "--open-settings" => {
+                open_settings = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    Args { screenshot, exit_after_frames, auto_type, auto_split, open_palette, palette_confirm }
+    Args { screenshot, exit_after_frames, auto_type, auto_split, open_palette, palette_confirm, open_settings }
 }
 
 fn build_palette() -> Palette {
     let mut palette = Palette::new();
     palette.set_items(vec![
+        PaletteItem::new("settings", "Open Settings", Category::Setting).with_keyword("preferences"),
         PaletteItem::new("split-h", "Split Pane Horizontally", Category::Action).with_keyword("vsplit"),
         PaletteItem::new("split-v", "Split Pane Vertically", Category::Action).with_keyword("hsplit"),
         PaletteItem::new("close-pane", "Close Active Pane", Category::Action),
@@ -140,6 +148,11 @@ struct GuiApp {
     open_palette_done: bool,
     palette_confirm: bool,
     palette_confirm_done: bool,
+    /// The terminal's own settings screen. `None` until first opened
+    /// (loading the config file is deferred so normal startup stays free
+    /// of disk I/O it doesn't need).
+    settings: Option<settings::SettingsState>,
+    settings_open: bool,
 }
 
 impl GuiApp {
@@ -168,6 +181,8 @@ impl GuiApp {
             open_palette_done: false,
             palette_confirm: args.palette_confirm,
             palette_confirm_done: false,
+            settings: args.open_settings.then(settings::SettingsState::load),
+            settings_open: args.open_settings,
         }
     }
 
@@ -201,7 +216,36 @@ impl GuiApp {
             "close-pane" => self.app.close_active(),
             "toggle-zoom" => self.app.zoom_active(),
             "quit" => self.app.should_quit = true,
+            "settings" => self.open_settings(),
             _ => {}
+        }
+    }
+
+    /// Open the settings screen, loading the config file on first use.
+    /// The one entry point every settings path goes through (palette,
+    /// Ctrl+Comma, `--open-settings`), so the state can never be shown
+    /// without being loaded.
+    fn open_settings(&mut self) {
+        if self.settings.is_none() {
+            self.settings = Some(settings::SettingsState::load());
+        }
+        // Reflect the live values the screen edits.
+        if let Some(s) = self.settings.as_mut() {
+            s.font_size = self.font_size;
+        }
+        self.settings_open = true;
+    }
+
+    /// Push the settings' current values into the running app: font size
+    /// is a GUI-level setting; the warning sensitivity applies to every
+    /// pane's confirmation gate right away (not just new panes).
+    fn apply_settings(&mut self) {
+        let Some(s) = self.settings.as_ref() else { return };
+        self.font_size = s.font_size;
+        self.char_size = None; // recomputed next frame
+        let threshold = settings::sensitivity_risk(s.sensitivity);
+        for pane in self.app.tab.panes_mut() {
+            pane.confirmation_threshold = threshold;
         }
     }
 
@@ -253,6 +297,28 @@ impl GuiApp {
                     if *key == EKey::P && mods.ctrl {
                         self.palette_open = !self.palette_open;
                         self.palette_state.clear();
+                        continue;
+                    }
+
+                    // Ctrl+Comma opens/closes the settings screen from
+                    // anywhere (the convention every settings dialog uses).
+                    if *key == EKey::Comma && mods.ctrl {
+                        if self.settings_open {
+                            self.settings_open = false;
+                        } else {
+                            self.open_settings();
+                        }
+                        continue;
+                    }
+
+                    // The settings screen is modal for the keyboard: typing
+                    // goes into its controls, not the shell underneath. Esc
+                    // is the keyboard's back button (the mouse one is drawn
+                    // in the window header).
+                    if self.settings_open {
+                        if *key == EKey::Escape {
+                            self.settings_open = false;
+                        }
                         continue;
                     }
 
@@ -418,6 +484,9 @@ impl eframe::App for GuiApp {
         });
 
         self.draw_palette(ctx);
+        if self.settings_open {
+            self.draw_settings(ctx);
+        }
 
         self.frame_count += 1;
 
@@ -463,8 +532,76 @@ impl GuiApp {
         }
     }
 
-    fn draw_palette(&mut self, ctx: &egui::Context) {
-        if !self.palette_open {
+    /// The terminal's own settings window. The header carries the back
+    /// button — the way back to the terminal, like every settings screen
+    /// (Esc does the same from the keyboard).
+    fn draw_settings(&mut self, ctx: &egui::Context) {
+        // Actions collected inside the window closure and performed after
+        // it returns (the closure borrows the settings state mutably, so
+        // anything touching the rest of `self` has to wait).
+        let mut close = false;
+        let mut apply = false;
+        egui::Window::new("settings")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("‹ Back").clicked() {
+                        close = true;
+                    }
+                    ui.heading("Settings");
+                });
+                ui.separator();
+
+                let Some(s) = self.settings.as_mut() else {
+                    return;
+                };
+
+                ui.add_space(4.0);
+                if ui.add(egui::Slider::new(&mut s.font_size, 8.0..=32.0).text("Font size")).changed() {
+                    s.dirty = true;
+                    apply = true;
+                }
+                ui.add_space(4.0);
+                egui::ComboBox::from_label("Warning sensitivity")
+                    .selected_text(settings::SENSITIVITY_LABELS[s.sensitivity])
+                    .show_ui(ui, |ui| {
+                        for (i, label) in settings::SENSITIVITY_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut s.sensitivity, i, *label).changed() {
+                                s.dirty = true;
+                                apply = true;
+                            }
+                        }
+                    });
+                if ui.button("Reset to defaults").clicked() {
+                    s.font_size = 15.0;
+                    s.sensitivity = 1;
+                    s.dirty = true;
+                    apply = true;
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(s.dirty, egui::Button::new("Save")).clicked() {
+                        s.save();
+                    }
+                    if let Some(status) = &s.status {
+                        ui.label(egui::RichText::new(status).weak());
+                    }
+                });
+            });
+        if close {
+            self.settings_open = false;
+        }
+        if apply {
+            self.apply_settings();
+        }
+    }
+
+    fn draw_palette(&mut self, ctx: &egui::Context) {        if !self.palette_open {
             return;
         }
         let items = self.palette_state.visible_items(&self.palette);

@@ -2956,9 +2956,12 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "ut-config",
  "ut-grid",
  "ut-input",
  "ut-palette",
+ "ut-profile",
+ "ut-safety",
  "ut-tui",
  "ut-ui",
 ]

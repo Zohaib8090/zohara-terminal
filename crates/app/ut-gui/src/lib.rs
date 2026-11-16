@@ -13,5 +13,6 @@
 //! `xvfb-run -a cargo run -p ut-gui -- --screenshot /tmp/out.png --exit-after-frames 5`.
 
 pub mod render;
+pub mod settings;
 
 pub use render::{grid_to_layout_job, grid_to_rows};

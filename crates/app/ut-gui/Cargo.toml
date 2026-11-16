@@ -19,6 +19,9 @@ ut-grid = { path = "../../core/ut-grid" }
 ut-ui = { path = "../ut-ui" }
 ut-input = { path = "../ut-input" }
 ut-palette = { path = "../ut-palette" }
+ut-config = { path = "../../core/ut-config" }
+ut-profile = { path = "../../services/ut-profile" }
+ut-safety = { path = "../../core/ut-safety" }
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "persistence"] }
 egui = "0.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
